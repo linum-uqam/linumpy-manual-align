@@ -10,14 +10,18 @@ with the linumpy stacking pipeline (linum_stack_slices_motor.py).
 
 Usage
 -----
-    .venv/bin/python tools/manual-align/manual_align.py \\
+    linumpy-manual-align \\
+        --data_package /path/to/manual_align_package/ \\
+        --server_config ~/Downloads/sub-22/nextflow.config
+
+    # Or directly from OME-Zarr volumes (requires linumpy):
+    linumpy-manual-align \\
         --input_dir /path/to/bring_to_common_space/ \\
         --transforms_dir /path/to/register_pairwise/ \\
-        --output_dir /path/to/manual_transforms/ \\
         --level 1
 
-After saving, copy the contents of ``output_dir`` into the server's
-``register_pairwise/`` directory and re-run the pipeline from the ``stack``
+After saving, use the Upload button (if --server_config provided) or manually
+copy the transforms to the server and re-run the pipeline from the ``stack``
 step with ``-resume``.
 """
 
@@ -37,8 +41,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--input_dir",
         type=Path,
         default=None,
-        help="Directory with common-space slices (slice_z##.ome.zarr).\n"
-        "Not needed when --data_package is used.",
+        help="Directory with common-space slices (slice_z##.ome.zarr).\nNot needed when --data_package is used.",
     )
     p.add_argument(
         "--transforms_dir",

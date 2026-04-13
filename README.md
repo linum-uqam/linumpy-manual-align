@@ -1,15 +1,44 @@
-# Manual Slice Alignment Tool
+# Linumpy Manual Align
 
 Napari-based interactive tool for manually correcting pairwise slice alignment
-in the linumpy reconstruction pipeline.
+in the [linumpy](https://github.com/linum-uqam/linumpy) reconstruction pipeline.
+
+## Installation
+
+```bash
+# From GitHub:
+pip install git+https://github.com/linum-uqam/linumpy-manual-align.git
+
+# With OME-Zarr support (requires linumpy):
+pip install "linumpy-manual-align[zarr] @ git+https://github.com/linum-uqam/linumpy-manual-align.git"
+
+# For development (from a local clone):
+pip install -e .
+```
 
 ## Usage
 
-Uses the linumpy venv (must have linumpy installed in editable mode):
+### With a data package (recommended — no linumpy needed)
+
+First export a data package on the server using `linum_export_manual_align.py`
+(included in linumpy), then download and align locally:
 
 ```bash
-cd /path/to/linumpy
-.venv/bin/python tools/manual-align/manual_align.py \
+linumpy-manual-align \
+    --data_package /path/to/manual_align_package/ \
+    --server_config ~/Downloads/sub-22/nextflow.config
+```
+
+### With server download/upload
+
+When `--server_config` is provided, the UI shows Download/Upload buttons
+for seamless transfer of data packages and manual transforms to/from the
+reconstruction server.
+
+### Directly from OME-Zarr volumes (requires linumpy)
+
+```bash
+linumpy-manual-align \
     --input_dir /path/to/bring_to_common_space/ \
     --transforms_dir /path/to/register_pairwise/ \
     --output_dir /path/to/manual_transforms/ \
@@ -21,7 +50,7 @@ cd /path/to/linumpy
 1. Red/green overlay shows consecutive slice pair (AIP projections)
 2. Adjust translation (drag or spinbox/arrows) and rotation (slider)
 3. Save corrected transform — outputs `.tfm` compatible with pipeline
-4. Copy saved `.tfm` files into `register_pairwise/slice_z##/` on server
+4. Upload transforms or copy to `register_pairwise/slice_z##/` on server
 5. Re-run pipeline from `stack` step with `-resume`
 
 ## Keyboard Shortcuts
