@@ -1,6 +1,6 @@
 """Server transfer helpers for the manual alignment tool.
 
-Provides download (export_manual_align output from server) and upload
+Provides download (make_manual_align_package output from server) and upload
 (manual transforms back to server) via SCP, using connection details
 parsed from a subject's nextflow.config.
 """
@@ -83,11 +83,11 @@ def download_manual_align_package(
     local_dir: Path,
     level: int = 1,
 ) -> tuple[bool, str]:
-    """Download the export_manual_align data package from the server.
+    """Download the manual_align data package from the server.
 
     Downloads:
-    - AIPs from output/export_manual_align/manual_align_package/aips/
-    - Transforms from output/export_manual_align/manual_align_package/transforms/
+    - AIPs from output/make_manual_align_package/manual_align_package/aips/
+    - Transforms from output/make_manual_align_package/manual_align_package/transforms/
     - Metadata JSON
 
     Parameters
@@ -107,7 +107,7 @@ def download_manual_align_package(
     local_dir = Path(local_dir)
     local_dir.mkdir(parents=True, exist_ok=True)
 
-    remote_pkg = f"{server.remote_output}/export_manual_align/manual_align_package"
+    remote_pkg = f"{server.remote_output}/make_manual_align_package/manual_align_package"
 
     # Download entire package recursively
     ok, msg = _run_scp(
