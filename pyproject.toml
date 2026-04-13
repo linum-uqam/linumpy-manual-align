@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Interactive napari tool for manual slice alignment correction in linumpy serial histology pipelines"
 readme = "README.md"
 license = "MIT"
-requires-python = ">=3.12"
+requires-python = ">=3.12,<3.14"
 authors = [
     { name = "LINUM Lab" },
 ]
@@ -24,9 +24,9 @@ classifiers = [
 ]
 dependencies = [
     "napari[all]>=0.5",
-    "numpy",
-    "scipy",
-    "SimpleITK",
+    "numpy>=1.26",
+    "scipy>=1.11",
+    "SimpleITK>=2.3",
 ]
 
 [project.optional-dependencies]
@@ -42,6 +42,15 @@ Repository = "https://github.com/linum-uqam/linumpy-manual-align"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/linumpy_manual_align"]
+
+[tool.uv]
+environments = [
+    "sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "sys_platform == 'linux' and platform_machine == 'x86_64'",
+]
+
+[tool.uv.sources]
+linumpy = { path = "../linumpy", editable = true }
 
 # --- ruff ---
 [tool.ruff]
