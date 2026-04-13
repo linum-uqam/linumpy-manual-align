@@ -31,7 +31,7 @@ dependencies = [
 
 [project.optional-dependencies]
 zarr = ["linumpy"]
-dev = ["ruff", "ty"]
+dev = ["pytest", "ruff", "ty"]
 
 [project.scripts]
 linumpy-manual-align = "linumpy_manual_align.__main__:main"

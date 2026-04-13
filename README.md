@@ -1,5 +1,7 @@
 # Linumpy Manual Align
 
+[![CI](https://github.com/linum-uqam/linumpy-manual-align/actions/workflows/ci.yml/badge.svg)](https://github.com/linum-uqam/linumpy-manual-align/actions/workflows/ci.yml)
+
 Napari-based interactive tool for manually correcting pairwise slice alignment
 in the [linumpy](https://github.com/linum-uqam/linumpy) reconstruction pipeline.
 
@@ -12,8 +14,10 @@ pip install git+https://github.com/linum-uqam/linumpy-manual-align.git
 # With OME-Zarr support (requires linumpy):
 pip install "linumpy-manual-align[zarr] @ git+https://github.com/linum-uqam/linumpy-manual-align.git"
 
-# For development (from a local clone):
-pip install -e .
+# For development:
+git clone https://github.com/linum-uqam/linumpy-manual-align.git
+cd linumpy-manual-align
+uv pip install -e ".[dev]"
 ```
 
 ## Usage
@@ -55,8 +59,23 @@ linumpy-manual-align \
 
 ## Keyboard Shortcuts
 
-- **Arrow keys**: Nudge translation ±1px (Shift: ±10px)
-- **`[` / `]`**: Rotate ±0.1° (Shift: ±1.0°)
-- **`N` / `P`**: Next / Previous slice pair
-- **`S`**: Save current pair
-- **Ctrl+Z / Ctrl+Shift+Z**: Undo / Redo
+| Key | Action |
+|-----|--------|
+| Arrow keys | Nudge translation ±1px (Shift: ±10px) |
+| `[` / `]` | Rotate ±0.1° (Shift: ±1.0°) |
+| `N` / `P` | Next / Previous slice pair |
+| `S` | Save current pair |
+| Ctrl+Z / Ctrl+Shift+Z | Undo / Redo |
+
+## Development
+
+```bash
+# Lint and format
+ruff check src/ && ruff format --check src/
+
+# Type check
+ty check src/
+
+# Run tests
+pytest tests/ -v
+```
