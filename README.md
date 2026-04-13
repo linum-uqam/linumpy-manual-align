@@ -22,25 +22,28 @@ uv pip install -e ".[dev]"
 
 ## Usage
 
-### With a data package (recommended)
+### With server download (recommended)
 
-The reconstruction pipeline exports a lightweight data package via
-`linum_export_manual_align.py` (on the server). Download the package
-locally, then align without needing linumpy installed:
+Point the tool at a local `nextflow.config` for the subject. The UI will
+show a Download button that fetches the data package directly from the
+reconstruction server via SCP — no linumpy installation needed locally:
 
 ```bash
-linumpy-manual-align \
-    --data_package /path/to/manual_align_package/ \
-    --server_config ~/Downloads/sub-22/nextflow.config
+linumpy-manual-align --server_config ~/Downloads/sub-22/nextflow.config
 ```
 
-### With server download/upload
+After aligning, use the Upload button to push manual transforms back to
+the server.
 
-When `--server_config` is provided, the UI shows Download/Upload buttons
-for seamless transfer of data packages and manual transforms to/from the
-reconstruction server.
+### With a local data package
 
-### Directly from OME-Zarr volumes (requires linumpy)
+If the data package has already been downloaded:
+
+```bash
+linumpy-manual-align --data_package /path/to/manual_align_package/
+```
+
+### Directly from OME-Zarr volumes (requires linumpy `[zarr]` extra)
 
 ```bash
 linumpy-manual-align \
