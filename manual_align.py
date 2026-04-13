@@ -42,8 +42,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--input_dir",
         type=Path,
-        required=True,
-        help="Directory with common-space slices (slice_z##.ome.zarr).",
+        default=None,
+        help="Directory with common-space slices (slice_z##.ome.zarr).\n"
+        "Not needed when --data_package is used.",
     )
     p.add_argument(
         "--transforms_dir",
@@ -70,14 +71,47 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="Only show pairs involving these moving slice IDs. Default: all.",
     )
+    p.add_argument(
+        "--data_package",
+        type=Path,
+        default=None,
+        help="Path to a data package exported by linum_export_manual_align.py.\n"
+        "When used, --input_dir and --transforms_dir are read from the package.",
+    )
     return p.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
 
+    # Resolve data package paths
+    aips_dir = None
+    if args.data_package is not None:
+        pkg = Path(args.data_package)
+        aips_dir = pkg / "aips"
+        if not aips_dir.exists():
+            raise FileNotFoundError(f"AIPs directory not found in data package: {aips_dir}")
+        # Use package transforms unless explicitly overridden
+        if args.transforms_dir is None:
+            pkg_tfm = pkg / "transforms"
+            if pkg_tfm.exists():
+                args.transforms_dir = pkg_tfm
+        # Read level from package metadata if not explicitly set
+        metadata_path = pkg / "manual_align_metadata.json"
+        if metadata_path.exists():
+            import json
+
+            metadata = json.loads(metadata_path.read_text())
+            if args.level == 1 and "pyramid_level" in metadata:
+                args.level = metadata["pyramid_level"]
+    elif args.input_dir is None:
+        raise ValueError("Either --input_dir or --data_package is required.")
+
     if args.output_dir is None:
-        args.output_dir = args.input_dir.parent / "manual_transforms"
+        if args.data_package is not None:
+            args.output_dir = Path(args.data_package) / "manual_transforms"
+        else:
+            args.output_dir = args.input_dir.parent / "manual_transforms"
 
     # Import napari late — startup takes a moment
     import napari
@@ -92,6 +126,7 @@ def main(argv: list[str] | None = None) -> None:
         output_dir=args.output_dir,
         level=args.level,
         filter_slices=args.slices,
+        aips_dir=aips_dir,
     )
     viewer.window.add_dock_widget(widget, name="Manual Align", area="right")
 

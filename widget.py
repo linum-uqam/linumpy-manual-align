@@ -97,21 +97,31 @@ class ManualAlignWidget(QWidget):
     def __init__(
         self,
         viewer: napari.Viewer,
-        input_dir: Path,
+        input_dir: Path | None,
         transforms_dir: Path | None,
         output_dir: Path,
         level: int = 1,
         filter_slices: list[int] | None = None,
+        aips_dir: Path | None = None,
     ):
         super().__init__()
         self.viewer = viewer
-        self.input_dir = Path(input_dir)
+        self.input_dir = Path(input_dir) if input_dir else None
         self.transforms_dir = Path(transforms_dir) if transforms_dir else None
         self.output_dir = Path(output_dir)
         self.level = level
+        self.aips_dir = Path(aips_dir) if aips_dir else None
 
-        # Discover slices and transforms
-        self.slice_paths = discover_slices(self.input_dir)
+        # Discover slices — from AIP package or OME-Zarr directory
+        if self.aips_dir is not None:
+            self.slice_paths = self._discover_aips(self.aips_dir)
+            self._use_precomputed_aips = True
+        elif self.input_dir is not None:
+            self.slice_paths = discover_slices(self.input_dir)
+            self._use_precomputed_aips = False
+        else:
+            raise ValueError("Either input_dir or aips_dir must be provided.")
+
         self.slice_ids = list(self.slice_paths.keys())
         self.existing_transforms = discover_transforms(self.transforms_dir) if self.transforms_dir else {}
 
@@ -262,24 +272,36 @@ class ManualAlignWidget(QWidget):
 
         layout.addStretch()
 
+    # ----- AIP discovery -----
+
+    @staticmethod
+    def _discover_aips(aips_dir: Path) -> dict[int, Path]:
+        """Discover pre-computed AIP .npz files."""
+        import re
+
+        pattern = re.compile(r"slice_z(\d+)")
+        aips = {}
+        for p in sorted(aips_dir.iterdir()):
+            m = pattern.search(p.name)
+            if m and p.name.endswith(".npz"):
+                aips[int(m.group(1))] = p
+        return dict(sorted(aips.items()))
+
     # ----- Pair loading -----
 
     def _load_pair(self, idx: int) -> None:
         """Load a slice pair and display as red/green AIP overlay."""
-        from linumpy.io.zarr import read_omezarr
-
         self.current_pair_idx = idx
         fid, mid = self.pairs[idx]
 
         self.viewer.status = f"Loading z{fid:02d} / z{mid:02d}..."
 
-        # Read slices at working resolution
-        fixed_vol, fixed_scale = read_omezarr(str(self.slice_paths[fid]), level=self.level)
-        moving_vol, moving_scale = read_omezarr(str(self.slice_paths[mid]), level=self.level)
-
-        # Compute AIPs
-        fixed_aip = np.asarray(fixed_vol).mean(axis=0).astype(np.float32)
-        moving_aip = np.asarray(moving_vol).mean(axis=0).astype(np.float32)
+        if self._use_precomputed_aips:
+            fixed_aip, fixed_scale_yx = self._load_aip_from_npz(self.slice_paths[fid])
+            moving_aip, moving_scale_yx = self._load_aip_from_npz(self.slice_paths[mid])
+        else:
+            fixed_aip, fixed_scale_yx = self._load_aip_from_zarr(self.slice_paths[fid])
+            moving_aip, moving_scale_yx = self._load_aip_from_zarr(self.slice_paths[mid])
 
         # Normalize to [0, 1] for display
         fixed_aip = self._normalize(fixed_aip)
@@ -304,7 +326,7 @@ class ManualAlignWidget(QWidget):
             colormap="green",
             blending="additive",
             contrast_limits=clim,
-            scale=fixed_scale[1:],  # YX only
+            scale=fixed_scale_yx,
         )
         self.moving_layer = self.viewer.add_image(
             moving_aip,
@@ -312,7 +334,7 @@ class ManualAlignWidget(QWidget):
             colormap="red",
             blending="additive",
             contrast_limits=clim,
-            scale=moving_scale[1:],
+            scale=moving_scale_yx,
         )
 
         # Connect layer translate events for bidirectional sync
@@ -333,6 +355,23 @@ class ManualAlignWidget(QWidget):
 
         self.viewer.reset_view()
         self.viewer.status = f"Pair z{fid:02d} → z{mid:02d} loaded"
+
+    def _load_aip_from_npz(self, npz_path: Path) -> tuple[np.ndarray, list[float]]:
+        """Load pre-computed AIP from an .npz file."""
+        data = np.load(str(npz_path))
+        aip = data["aip"].astype(np.float32)
+        scale = data["scale"]
+        # Scale is (Z, Y, X) from OME-Zarr; return YX only
+        scale_yx = list(scale[1:]) if len(scale) == 3 else list(scale)
+        return aip, scale_yx
+
+    def _load_aip_from_zarr(self, zarr_path: Path) -> tuple[np.ndarray, list[float]]:
+        """Load a volume from OME-Zarr and compute the AIP."""
+        from linumpy.io.zarr import read_omezarr
+
+        vol, scale = read_omezarr(str(zarr_path), level=self.level)
+        aip = np.asarray(vol).mean(axis=0).astype(np.float32)
+        return aip, list(scale[1:])  # YX only
 
     def _normalize(self, img: np.ndarray) -> np.ndarray:
         p_low = np.percentile(img[img > 0], 0.1) if np.any(img > 0) else 0
