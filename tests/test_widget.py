@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from linumpy_manual_align.__main__ import parse_args
-from linumpy_manual_align.widget import AlignmentState, UndoStack
+from linumpy_manual_align.widget import _MAX_UNDO_HISTORY, AlignmentState, UndoStack
 
 
 class TestAlignmentState:
@@ -87,6 +87,18 @@ class TestUndoStack:
         assert stack.current.tx == 1.0
         stack.redo()
         assert stack.current.tx == 2.0
+
+    def test_max_history_enforced(self) -> None:
+        stack = UndoStack()
+        for i in range(1, _MAX_UNDO_HISTORY + 100):
+            stack.push(AlignmentState(tx=float(i)))
+        # History should be capped
+        assert stack.current.tx == float(_MAX_UNDO_HISTORY + 99)
+        # We should be able to undo _MAX_UNDO_HISTORY - 1 times (current is one entry)
+        count = 0
+        while stack.undo() is not None:
+            count += 1
+        assert count == _MAX_UNDO_HISTORY - 1
 
 
 class TestParseArgs:

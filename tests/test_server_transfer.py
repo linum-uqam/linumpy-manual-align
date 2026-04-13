@@ -19,6 +19,17 @@ class TestParseServerConfig:
         assert cfg.subject_id == "sub-22"
         assert cfg.host == "132.207.157.41"
         assert cfg.remote_output == "/scratch/workspace/sub-22/output"
+        assert cfg.config_path == config_path
+
+    def test_custom_host(self, tmp_path: Path) -> None:
+        sub_dir = tmp_path / "sub-22"
+        sub_dir.mkdir()
+        config_path = sub_dir / "nextflow.config"
+        config_path.write_text("")
+
+        cfg = parse_server_config(config_path, host="10.0.0.1")
+        assert cfg is not None
+        assert cfg.host == "10.0.0.1"
 
     def test_different_subject(self, tmp_path: Path) -> None:
         sub_dir = tmp_path / "sub-05"

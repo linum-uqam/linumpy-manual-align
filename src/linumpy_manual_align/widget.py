@@ -11,19 +11,23 @@ the linumpy stacking pipeline.
 from __future__ import annotations
 
 import logging
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import napari
 import numpy as np
-from qtpy.QtCore import Qt
+from qtpy.QtCore import Qt, QThread, Signal
 from qtpy.QtWidgets import (
     QComboBox,
     QDoubleSpinBox,
+    QFileDialog,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
+    QMessageBox,
     QPushButton,
     QSlider,
     QVBoxLayout,
@@ -34,12 +38,19 @@ from scipy.ndimage import rotate as ndimage_rotate
 from linumpy_manual_align.transform_io import (
     discover_slices,
     discover_transforms,
+    load_offsets,
     load_pairwise_metrics,
     load_transform,
     save_transform,
 )
 
 logger = logging.getLogger(__name__)
+
+_IS_MACOS = sys.platform == "darwin"
+_UNDO_LABEL = "Undo (⌘Z)" if _IS_MACOS else "Undo (Ctrl+Z)"
+_REDO_LABEL = "Redo (⌘⇧Z)" if _IS_MACOS else "Redo (Ctrl+Shift+Z)"
+
+_MAX_UNDO_HISTORY = 500
 
 # ---------------------------------------------------------------------------
 # Undo / redo
@@ -71,6 +82,11 @@ class UndoStack:
         self._history = self._history[: self._index + 1]
         self._history.append(AlignmentState(state.tx, state.ty, state.rotation))
         self._index = len(self._history) - 1
+        # Enforce maximum history size
+        if len(self._history) > _MAX_UNDO_HISTORY:
+            trim = len(self._history) - _MAX_UNDO_HISTORY
+            self._history = self._history[trim:]
+            self._index -= trim
 
     def undo(self) -> AlignmentState | None:
         if self._index > 0:
@@ -89,6 +105,26 @@ class UndoStack:
     @property
     def current(self) -> AlignmentState:
         return self._history[self._index]
+
+
+# ---------------------------------------------------------------------------
+# Background worker for server operations
+# ---------------------------------------------------------------------------
+
+
+class _ScpWorker(QThread):
+    """Background QThread for SCP download/upload operations."""
+
+    finished = Signal(bool, str)
+
+    def __init__(self, func: object, args: tuple) -> None:
+        super().__init__()
+        self._func = func
+        self._args = args
+
+    def run(self) -> None:
+        ok, msg = self._func(*self._args)
+        self.finished.emit(ok, msg)
 
 
 # ---------------------------------------------------------------------------
@@ -127,7 +163,9 @@ class ManualAlignWidget(QWidget):
             self.slice_paths = discover_slices(self.input_dir)
             self._use_precomputed_aips = False
         else:
-            raise ValueError("Either input_dir or aips_dir must be provided.")
+            # Empty startup — will be populated after server download
+            self.slice_paths = {}
+            self._use_precomputed_aips = True
 
         self.slice_ids = list(self.slice_paths.keys())
         self.existing_transforms = discover_transforms(self.transforms_dir) if self.transforms_dir else {}
@@ -140,11 +178,12 @@ class ManualAlignWidget(QWidget):
                 self.pairs.append((fid, mid))
 
         if not self.pairs:
-            raise ValueError("No slice pairs found to align.")
+            logger.info("Starting in empty state — no slice pairs found. Download data from server.")
 
         # Per-pair state
         self.undo_stacks: dict[int, UndoStack] = {}  # keyed by moving_id
         self.saved_pairs: set[int] = set()  # moving_ids that have been saved
+        self.unsaved_changes: set[int] = set()  # moving_ids with unsaved modifications
         self.pair_centers: dict[int, tuple[float, float]] = {}  # (cx, cy) per moving_id
 
         # Layers (set during pair loading)
@@ -153,13 +192,19 @@ class ManualAlignWidget(QWidget):
         self._original_moving_aip: np.ndarray | None = None  # before rotation
         self._suppress_translate_event = False
         self._suppress_spinbox_event = False
+        self._worker: _ScpWorker | None = None  # prevent GC of background thread
+        self._close_confirmed = False
 
         # Current pair index
         self.current_pair_idx = 0
 
         self._build_ui()
         self._install_keybindings()
-        self._load_pair(0)
+        self._install_close_guard()
+        if self.pairs:
+            self._load_pair(0)
+        else:
+            self._update_status()
 
     # ----- UI construction -----
 
@@ -247,11 +292,11 @@ class ManualAlignWidget(QWidget):
         self.btn_reset.clicked.connect(self._reset_transform)
         action_layout.addWidget(self.btn_reset)
 
-        self.btn_undo = QPushButton("Undo (⌘Z)")
+        self.btn_undo = QPushButton(_UNDO_LABEL)
         self.btn_undo.clicked.connect(self._undo)
         action_layout.addWidget(self.btn_undo)
 
-        self.btn_redo = QPushButton("Redo (⌘⇧Z)")
+        self.btn_redo = QPushButton(_REDO_LABEL)
         self.btn_redo.clicked.connect(self._redo)
         action_layout.addWidget(self.btn_redo)
 
@@ -277,11 +322,30 @@ class ManualAlignWidget(QWidget):
         server_layout = QVBoxLayout()
         server_group.setLayout(server_layout)
 
+        # Config file selector
+        config_layout = QHBoxLayout()
+        config_layout.addWidget(QLabel("Config:"))
+        self.config_path_edit = QLineEdit()
+        self.config_path_edit.setPlaceholderText("nextflow.config path...")
+        self.config_path_edit.setReadOnly(True)
+        config_layout.addWidget(self.config_path_edit, stretch=1)
+        self.btn_browse_config = QPushButton("Browse...")
+        self.btn_browse_config.clicked.connect(self._browse_server_config)
+        config_layout.addWidget(self.btn_browse_config)
+        server_layout.addLayout(config_layout)
+
+        # Host field
+        host_layout = QHBoxLayout()
+        host_layout.addWidget(QLabel("Host:"))
+        self.host_edit = QLineEdit("132.207.157.41")
+        self.host_edit.setPlaceholderText("server hostname or IP")
+        self.host_edit.textChanged.connect(self._on_host_changed)
+        host_layout.addWidget(self.host_edit, stretch=1)
+        server_layout.addLayout(host_layout)
+
         server_btn_layout = QHBoxLayout()
         self.btn_download = QPushButton("⬇ Download Data")
-        self.btn_download.setToolTip(
-            "Download AIPs and transforms from the server.\nRequires SSH access and a --server_config."
-        )
+        self.btn_download.setToolTip("Download AIPs and transforms from the server.\nRequires a configured server.")
         self.btn_download.clicked.connect(self._download_from_server)
         server_btn_layout.addWidget(self.btn_download)
 
@@ -297,11 +361,15 @@ class ManualAlignWidget(QWidget):
         self.server_status_label.setWordWrap(True)
         server_layout.addWidget(self.server_status_label)
 
-        # Disable buttons if no server config
-        if self.server_config is None:
+        # Initialize server UI state
+        if self.server_config is not None:
+            if hasattr(self.server_config, "config_path") and self.server_config.config_path:
+                self.config_path_edit.setText(str(self.server_config.config_path))
+            self.host_edit.setText(self.server_config.host)
+        else:
             self.btn_download.setEnabled(False)
             self.btn_upload.setEnabled(False)
-            self.server_status_label.setText("<i>No --server_config provided</i>")
+            self.server_status_label.setText("<i>Browse for a nextflow.config to enable server features</i>")
 
         layout.addWidget(server_group)
 
@@ -337,8 +405,19 @@ class ManualAlignWidget(QWidget):
         tfm_files = list(tfm_dir.glob("*.tfm"))
         if not tfm_files:
             return AlignmentState()
-        tx, ty, rot = load_transform(tfm_files[0])
+        tx, ty, rot, tfm_center = load_transform(tfm_files[0])
         scale = 2**self.level
+        # Adjust for rotation center difference between automated transform and our image center
+        img_center = self.pair_centers.get(mid)
+        if img_center is not None and abs(rot) > 0.01:
+            img_cx = img_center[0] * scale
+            img_cy = img_center[1] * scale
+            dcx = tfm_center[0] - img_cx
+            dcy = tfm_center[1] - img_cy
+            rad = np.radians(rot)
+            cos_r, sin_r = np.cos(rad), np.sin(rad)
+            tx += (1 - cos_r) * dcx + sin_r * dcy
+            ty += -sin_r * dcx + (1 - cos_r) * dcy
         return AlignmentState(tx=tx / scale, ty=ty / scale, rotation=rot)
 
     def _load_pair(self, idx: int) -> None:
@@ -438,13 +517,14 @@ class ManualAlignWidget(QWidget):
 
     def _apply_state(self, state: AlignmentState, push: bool = True) -> None:
         """Apply an alignment state to the moving layer."""
-        if self.moving_layer is None or self._original_moving_aip is None:
+        if self.moving_layer is None or self._original_moving_aip is None or not self.pairs:
             return
 
         mid = self.pairs[self.current_pair_idx][1]
 
         if push:
             self.undo_stacks[mid].push(state)
+            self.unsaved_changes.add(mid)
 
         # Apply rotation to image data
         if abs(state.rotation) > 0.01:
@@ -543,6 +623,8 @@ class ManualAlignWidget(QWidget):
     # ----- Undo / redo -----
 
     def _undo(self) -> None:
+        if not self.pairs:
+            return
         mid = self.pairs[self.current_pair_idx][1]
         stack = self.undo_stacks.get(mid)
         if stack:
@@ -552,6 +634,8 @@ class ManualAlignWidget(QWidget):
                 self._update_status()
 
     def _redo(self) -> None:
+        if not self.pairs:
+            return
         mid = self.pairs[self.current_pair_idx][1]
         stack = self.undo_stacks.get(mid)
         if stack:
@@ -564,6 +648,8 @@ class ManualAlignWidget(QWidget):
 
     def _load_automated_transform(self) -> None:
         """Load the existing automated transform as starting point."""
+        if not self.pairs:
+            return
         mid = self.pairs[self.current_pair_idx][1]
         if mid not in self.existing_transforms:
             self.viewer.status = f"No automated transform for z{mid:02d}"
@@ -575,12 +661,22 @@ class ManualAlignWidget(QWidget):
             self.viewer.status = f"No .tfm file in {tfm_dir}"
             return
 
-        tx, ty, rot = load_transform(tfm_files[0])
-        # Scale from full resolution to working resolution
+        tx, ty, rot, tfm_center = load_transform(tfm_files[0])
         scale = 2**self.level
+        # Adjust for rotation center difference
+        img_center = self.pair_centers.get(mid)
+        if img_center is not None and abs(rot) > 0.01:
+            img_cx = img_center[0] * scale
+            img_cy = img_center[1] * scale
+            dcx = tfm_center[0] - img_cx
+            dcy = tfm_center[1] - img_cy
+            rad = np.radians(rot)
+            cos_r, sin_r = np.cos(rad), np.sin(rad)
+            tx += (1 - cos_r) * dcx + sin_r * dcy
+            ty += -sin_r * dcx + (1 - cos_r) * dcy
         state = AlignmentState(tx=tx / scale, ty=ty / scale, rotation=rot)
         self._apply_state(state, push=True)
-        self.viewer.status = f"Loaded automated transform for z{mid:02d}: tx={tx:.1f} ty={ty:.1f} rot={rot:.2f}°"
+        self.viewer.status = f"Loaded automated transform for z{mid:02d}: tx={state.tx:.1f} ty={state.ty:.1f} rot={rot:.2f}°"
         self._update_status()
 
     def _reset_transform(self) -> None:
@@ -592,35 +688,50 @@ class ManualAlignWidget(QWidget):
 
     def _save_current(self) -> None:
         """Save the current transform for the current pair."""
+        if not self.pairs:
+            return
         _fid, mid = self.pairs[self.current_pair_idx]
         state = self._current_state()
 
         cx, cy = self.pair_centers.get(mid, (0.0, 0.0))
 
+        # Carry over automated offsets if available
+        offsets = (0, 0)
+        if mid in self.existing_transforms:
+            offsets = load_offsets(self.existing_transforms[mid] / "offsets.txt")
+
         out_dir = self.output_dir / f"slice_z{mid:02d}"
-        save_transform(out_dir, state.tx, state.ty, state.rotation, center=(cx, cy), level=self.level)
+        save_transform(out_dir, state.tx, state.ty, state.rotation, center=(cx, cy), level=self.level, offsets=offsets)
         self.saved_pairs.add(mid)
+        self.unsaved_changes.discard(mid)
         self.viewer.status = f"Saved transform for z{mid:02d} → {out_dir}"
         self._update_status()
 
     def _save_all_and_exit(self) -> None:
-        """Save all modified (non-zero) pairs and close."""
+        """Save all modified pairs and close."""
         count = 0
         for _fid, mid in self.pairs:
+            if mid not in self.unsaved_changes:
+                continue
             stack = self.undo_stacks.get(mid)
             if stack is None:
                 continue
             state = stack.current
-            if state.tx == 0 and state.ty == 0 and state.rotation == 0:
-                continue  # Skip untouched pairs
 
             cx, cy = self.pair_centers.get(mid, (0.0, 0.0))
 
+            # Carry over automated offsets if available
+            offsets = (0, 0)
+            if mid in self.existing_transforms:
+                offsets = load_offsets(self.existing_transforms[mid] / "offsets.txt")
+
             out_dir = self.output_dir / f"slice_z{mid:02d}"
-            save_transform(out_dir, state.tx, state.ty, state.rotation, center=(cx, cy), level=self.level)
+            save_transform(out_dir, state.tx, state.ty, state.rotation, center=(cx, cy), level=self.level, offsets=offsets)
             self.saved_pairs.add(mid)
             count += 1
 
+        self.unsaved_changes.clear()
+        self._close_confirmed = True
         self.viewer.status = f"Saved {count} transforms to {self.output_dir}"
         logger.info(f"Saved {count} manual transforms to {self.output_dir}")
         self.viewer.close()
@@ -628,26 +739,33 @@ class ManualAlignWidget(QWidget):
     # ----- Server transfer -----
 
     def _download_from_server(self) -> None:
-        """Download the manual alignment data package from the server."""
+        """Download the manual alignment data package from the server (in background thread)."""
         from linumpy_manual_align.server_transfer import download_manual_align_package
 
         if self.server_config is None:
             return
 
         self.btn_download.setEnabled(False)
+        self.btn_upload.setEnabled(False)
         self.server_status_label.setText("<i>Downloading...</i>")
         self.viewer.status = "Downloading data from server..."
 
         # Determine local destination
         local_dir = self.aips_dir.parent if self.aips_dir is not None else self.output_dir.parent / "server_package"
 
-        ok, msg = download_manual_align_package(self.server_config, local_dir, self.level)
+        self._worker = _ScpWorker(download_manual_align_package, (self.server_config, local_dir, self.level))
+        self._worker.finished.connect(lambda ok, msg: self._on_download_finished(ok, msg, local_dir))
+        self._worker.start()
+
+    def _on_download_finished(self, ok: bool, msg: str, local_dir: Path) -> None:
+        """Handle completion of background download."""
         self.server_status_label.setText(msg)
         self.viewer.status = msg
         self.btn_download.setEnabled(True)
+        self.btn_upload.setEnabled(True)
+        self._worker = None
 
         if ok:
-            # Reload AIPs from downloaded package
             pkg_aips = local_dir / "manual_align_package" / "aips"
             if not pkg_aips.exists():
                 pkg_aips = local_dir / "aips"
@@ -667,7 +785,7 @@ class ManualAlignWidget(QWidget):
                 self._rebuild_pairs()
 
     def _upload_to_server(self) -> None:
-        """Upload saved manual transforms to the server."""
+        """Upload saved manual transforms to the server (in background thread)."""
         from linumpy_manual_align.server_transfer import upload_manual_transforms
 
         if self.server_config is None:
@@ -677,14 +795,22 @@ class ManualAlignWidget(QWidget):
             self.server_status_label.setText("No saved transforms to upload")
             return
 
+        self.btn_download.setEnabled(False)
         self.btn_upload.setEnabled(False)
         self.server_status_label.setText("<i>Uploading...</i>")
         self.viewer.status = "Uploading transforms to server..."
 
-        _ok, msg = upload_manual_transforms(self.server_config, self.output_dir)
+        self._worker = _ScpWorker(upload_manual_transforms, (self.server_config, self.output_dir))
+        self._worker.finished.connect(self._on_upload_finished)
+        self._worker.start()
+
+    def _on_upload_finished(self, ok: bool, msg: str) -> None:
+        """Handle completion of background upload."""
         self.server_status_label.setText(msg)
         self.viewer.status = msg
+        self.btn_download.setEnabled(True)
         self.btn_upload.setEnabled(True)
+        self._worker = None
 
     def _rebuild_pairs(self) -> None:
         """Rebuild pair list after slice discovery changes, then reload UI."""
@@ -717,6 +843,11 @@ class ManualAlignWidget(QWidget):
     # ----- Status display -----
 
     def _update_status(self) -> None:
+        if not self.pairs:
+            self.status_label.setText(
+                "<i>No data loaded. Use the Server section to download or launch with --data_package.</i>"
+            )
+            return
         fid, mid = self.pairs[self.current_pair_idx]
         state = self._current_state()
         scale = 2**self.level
@@ -857,3 +988,75 @@ class ManualAlignWidget(QWidget):
         state.rotation += delta_deg
         self._apply_state(state, push=True)
         self._update_status()
+
+    # ----- Close guard -----
+
+    def _install_close_guard(self) -> None:
+        """Install event filter to warn about unsaved changes on window close."""
+        try:
+            main_window = self.viewer.window._qt_window
+            main_window.installEventFilter(self)
+        except AttributeError:
+            pass  # napari API changed; skip gracefully
+
+    def eventFilter(self, obj: object, event: object) -> bool:
+        """Intercept close events to warn about unsaved changes."""
+        from qtpy.QtCore import QEvent as _QEvent
+
+        if isinstance(event, _QEvent) and event.type() == _QEvent.Close and not self._confirm_close():
+            event.ignore()
+            return True
+        return super().eventFilter(obj, event)
+
+    def _confirm_close(self) -> bool:
+        """Return True if it's OK to close (no unsaved changes or user confirmed)."""
+        if self._close_confirmed:
+            return True
+        if not self.unsaved_changes:
+            return True
+        n = len(self.unsaved_changes)
+        reply = QMessageBox.question(
+            self,
+            "Unsaved Changes",
+            f"{n} modified pair(s) have unsaved changes.\nClose without saving?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        return reply == QMessageBox.Yes
+
+    # ----- Server config GUI -----
+
+    def _browse_server_config(self) -> None:
+        """Open file dialog to select a nextflow.config for server access."""
+        start_dir = str(Path.home() / "Downloads")
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select nextflow.config",
+            start_dir,
+            "Config files (*.config);;All files (*)",
+        )
+        if not path:
+            return
+        self._on_config_selected(Path(path))
+
+    def _on_config_selected(self, config_path: Path) -> None:
+        """Parse a nextflow.config and enable server features."""
+        from linumpy_manual_align.server_transfer import parse_server_config
+
+        host = self.host_edit.text().strip() or "132.207.157.41"
+        cfg = parse_server_config(config_path, host=host)
+        if cfg is None:
+            self.server_status_label.setText("<b style='color: red;'>Failed to parse config</b>")
+            return
+
+        self.server_config = cfg
+        self.config_path_edit.setText(str(config_path))
+        self.host_edit.setText(cfg.host)
+        self.btn_download.setEnabled(True)
+        self.btn_upload.setEnabled(True)
+        self.server_status_label.setText(f"Configured: {cfg.subject_id} @ {cfg.host}")
+
+    def _on_host_changed(self, text: str) -> None:
+        """Update server config host when the user edits the host field."""
+        if self.server_config is not None:
+            self.server_config.host = text.strip()

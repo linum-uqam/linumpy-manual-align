@@ -23,9 +23,10 @@ class ServerConfig:
     host: str
     remote_output: str  # e.g. /scratch/workspace/sub-22/output
     subject_id: str  # e.g. sub-22
+    config_path: Path | None = None
 
 
-def parse_server_config(config_path: Path) -> ServerConfig | None:
+def parse_server_config(config_path: Path, *, host: str = "132.207.157.41") -> ServerConfig | None:
     """Parse server connection info from a local nextflow.config.
 
     Extracts the output directory pattern and derives the subject ID
@@ -35,6 +36,8 @@ def parse_server_config(config_path: Path) -> ServerConfig | None:
     ----------
     config_path : Path
         Path to a local copy of the subject's nextflow.config.
+    host : str
+        Server hostname or IP. Defaults to the LINUM lab server.
 
     Returns
     -------
@@ -51,14 +54,13 @@ def parse_server_config(config_path: Path) -> ServerConfig | None:
     if not re.match(r"sub-\d+", subject_id):
         logger.warning(f"Parent directory '{subject_id}' doesn't look like a subject ID")
 
-    # Server host (hardcoded — matches update_files.sh convention)
-    host = "132.207.157.41"
+    # Server host (from parameter — default matches update_files.sh convention)
 
     # Remote workspace path follows convention: /scratch/workspace/{subject_id}/
     remote_workspace = f"/scratch/workspace/{subject_id}"
     remote_output = f"{remote_workspace}/output"
 
-    return ServerConfig(host=host, remote_output=remote_output, subject_id=subject_id)
+    return ServerConfig(host=host, remote_output=remote_output, subject_id=subject_id, config_path=config_path)
 
 
 def _run_scp(args: list[str], description: str) -> tuple[bool, str]:

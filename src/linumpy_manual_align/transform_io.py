@@ -14,8 +14,8 @@ import numpy as np
 import SimpleITK as sitk
 
 
-def load_transform(tfm_path: Path) -> tuple[float, float, float]:
-    """Load a .tfm file and return (tx, ty, rotation_deg).
+def load_transform(tfm_path: Path) -> tuple[float, float, float, tuple[float, float]]:
+    """Load a .tfm file and return (tx, ty, rotation_deg, center_xy).
 
     Parameters
     ----------
@@ -24,8 +24,8 @@ def load_transform(tfm_path: Path) -> tuple[float, float, float]:
 
     Returns
     -------
-    tuple[float, float, float]
-        (tx, ty, rotation_deg) in pixels and degrees.
+    tuple[float, float, float, tuple[float, float]]
+        (tx, ty, rotation_deg, (center_x, center_y)) in pixels and degrees.
     """
     tfm = sitk.ReadTransform(str(tfm_path))
     params = tfm.GetParameters()
@@ -33,7 +33,31 @@ def load_transform(tfm_path: Path) -> tuple[float, float, float]:
     rotation_deg = float(np.degrees(params[2]))
     tx = float(params[3])
     ty = float(params[4])
-    return tx, ty, rotation_deg
+    fixed_params = tfm.GetFixedParameters()
+    cx = float(fixed_params[0]) if len(fixed_params) > 0 else 0.0
+    cy = float(fixed_params[1]) if len(fixed_params) > 1 else 0.0
+    return tx, ty, rotation_deg, (cx, cy)
+
+
+def load_offsets(offsets_path: Path) -> tuple[int, int]:
+    """Load Z-overlap offsets from an offsets.txt file.
+
+    Parameters
+    ----------
+    offsets_path : Path
+        Path to offsets.txt.
+
+    Returns
+    -------
+    tuple[int, int]
+        (fixed_z, moving_z) offsets, or (0, 0) if file doesn't exist.
+    """
+    if not offsets_path.exists():
+        return (0, 0)
+    vals = np.loadtxt(str(offsets_path), dtype=int)
+    if vals.size >= 2:
+        return (int(vals[0]), int(vals[1]))
+    return (0, 0)
 
 
 def save_transform(
@@ -43,6 +67,7 @@ def save_transform(
     rotation_deg: float,
     center: tuple[float, float],
     level: int = 0,
+    offsets: tuple[int, int] = (0, 0),
 ) -> Path:
     """Save a manual alignment transform as a .tfm file.
 
@@ -64,6 +89,8 @@ def save_transform(
         (cx, cy) rotation center at working resolution.
     level : int
         Pyramid level used for alignment (0 = full res, 1 = 2x, ...).
+    offsets : tuple[int, int]
+        Z-overlap offsets (fixed_z, moving_z) to carry over from automated transform.
 
     Returns
     -------
@@ -87,9 +114,9 @@ def save_transform(
     tfm_path = output_dir / "transform.tfm"
     sitk.WriteTransform(transform, str(tfm_path))
 
-    # Write companion offsets.txt (zeros — manual transforms don't have Z-offset info)
+    # Write companion offsets.txt (carries over automated offsets or zeros for new transforms)
     offsets_path = output_dir / "offsets.txt"
-    np.savetxt(str(offsets_path), [0, 0], fmt="%d")
+    np.savetxt(str(offsets_path), list(offsets), fmt="%d")
 
     # Write metrics JSON
     mag = float(np.sqrt(full_tx**2 + full_ty**2))

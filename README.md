@@ -24,16 +24,23 @@ uv pip install -e ".[dev]"
 
 ### With server download (recommended)
 
-Point the tool at a local `nextflow.config` for the subject. The UI will
-show a Download button that fetches the data package directly from the
-reconstruction server via SCP — no linumpy installation needed locally:
+Launch the tool with no data arguments — open the server panel, browse
+to a local `nextflow.config`, and click **Download** to fetch the data
+package from the reconstruction server via SCP:
+
+```bash
+linumpy-manual-align
+```
+
+You can also pre-populate the server config path from the CLI:
 
 ```bash
 linumpy-manual-align --server_config ~/Downloads/sub-22/nextflow.config
 ```
 
-After aligning, use the Upload button to push manual transforms back to
-the server.
+After aligning, use the **Upload** button to push manual transforms back
+to the server.  The server config can also be changed at any time using
+the **Browse…** button in the Server panel.
 
 ### With a local data package
 

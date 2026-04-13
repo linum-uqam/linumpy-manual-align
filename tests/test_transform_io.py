@@ -8,6 +8,7 @@ from pathlib import Path
 from linumpy_manual_align.transform_io import (
     discover_slices,
     discover_transforms,
+    load_offsets,
     load_pairwise_metrics,
     load_transform,
     save_transform,
@@ -21,16 +22,18 @@ class TestSaveLoadRoundTrip:
         out_dir = tmp_path / "slice_z00"
         save_transform(out_dir, tx=0.0, ty=0.0, rotation_deg=0.0, center=(100.0, 100.0), level=0)
 
-        tx, ty, rot = load_transform(out_dir / "transform.tfm")
+        tx, ty, rot, center = load_transform(out_dir / "transform.tfm")
         assert abs(tx) < 1e-6
         assert abs(ty) < 1e-6
         assert abs(rot) < 1e-6
+        assert abs(center[0] - 100.0) < 1e-6
+        assert abs(center[1] - 100.0) < 1e-6
 
     def test_translation_only(self, tmp_path: Path) -> None:
         out_dir = tmp_path / "slice_z01"
         save_transform(out_dir, tx=10.5, ty=-7.3, rotation_deg=0.0, center=(256.0, 256.0), level=0)
 
-        tx, ty, rot = load_transform(out_dir / "transform.tfm")
+        tx, ty, rot, _center = load_transform(out_dir / "transform.tfm")
         assert abs(tx - 10.5) < 1e-4
         assert abs(ty - (-7.3)) < 1e-4
         assert abs(rot) < 1e-4
@@ -39,7 +42,7 @@ class TestSaveLoadRoundTrip:
         out_dir = tmp_path / "slice_z02"
         save_transform(out_dir, tx=0.0, ty=0.0, rotation_deg=2.5, center=(128.0, 128.0), level=0)
 
-        _tx, _ty, rot = load_transform(out_dir / "transform.tfm")
+        _tx, _ty, rot, _center = load_transform(out_dir / "transform.tfm")
         # With rotation around non-origin center, tx/ty may be nonzero in the .tfm params
         # but the rotation should be preserved exactly
         assert abs(rot - 2.5) < 1e-4
@@ -48,7 +51,7 @@ class TestSaveLoadRoundTrip:
         out_dir = tmp_path / "slice_z03"
         save_transform(out_dir, tx=15.0, ty=-20.0, rotation_deg=1.7, center=(200.0, 150.0), level=0)
 
-        tx, ty, rot = load_transform(out_dir / "transform.tfm")
+        tx, ty, rot, _center = load_transform(out_dir / "transform.tfm")
         assert abs(tx - 15.0) < 1e-4
         assert abs(ty - (-20.0)) < 1e-4
         assert abs(rot - 1.7) < 1e-4
@@ -58,7 +61,7 @@ class TestSaveLoadRoundTrip:
         out_dir = tmp_path / "slice_z04"
         save_transform(out_dir, tx=5.0, ty=-3.0, rotation_deg=0.5, center=(100.0, 100.0), level=2)
 
-        tx, ty, rot = load_transform(out_dir / "transform.tfm")
+        tx, ty, rot, _center = load_transform(out_dir / "transform.tfm")
         # tx/ty should be 4x the working-resolution values (level=2 → 2^2=4)
         assert abs(tx - 20.0) < 1e-4
         assert abs(ty - (-12.0)) < 1e-4
@@ -131,3 +134,24 @@ class TestDiscoverTransforms:
 
     def test_empty_directory(self, tmp_path: Path) -> None:
         assert discover_transforms(tmp_path) == {}
+
+
+class TestLoadOffsets:
+    def test_nonexistent_returns_zeros(self, tmp_path: Path) -> None:
+        result = load_offsets(tmp_path / "offsets.txt")
+        assert result == (0, 0)
+
+    def test_valid_offsets(self, tmp_path: Path) -> None:
+        import numpy as np
+
+        offsets_path = tmp_path / "offsets.txt"
+        np.savetxt(str(offsets_path), [5, 12], fmt="%d")
+        result = load_offsets(offsets_path)
+        assert result == (5, 12)
+
+    def test_offsets_roundtrip(self, tmp_path: Path) -> None:
+        """Offsets saved by save_transform can be loaded by load_offsets."""
+        out_dir = tmp_path / "slice_z07"
+        save_transform(out_dir, tx=1.0, ty=2.0, rotation_deg=0.0, center=(50.0, 50.0), level=0, offsets=(3, 7))
+        result = load_offsets(out_dir / "offsets.txt")
+        assert result == (3, 7)

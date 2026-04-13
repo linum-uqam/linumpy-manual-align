@@ -108,14 +108,17 @@ def main(argv: list[str] | None = None) -> None:
             metadata = json.loads(metadata_path.read_text())
             if args.level == 1 and "pyramid_level" in metadata:
                 args.level = metadata["pyramid_level"]
-    elif args.input_dir is None:
-        raise ValueError("Either --input_dir or --data_package is required.")
+    elif args.input_dir is None and args.server_config is None:
+        raise ValueError("Either --input_dir, --data_package, or --server_config is required.")
 
     if args.output_dir is None:
         if args.data_package is not None:
             args.output_dir = Path(args.data_package) / "manual_transforms"
-        else:
+        elif args.input_dir is not None:
             args.output_dir = args.input_dir.parent / "manual_transforms"
+        else:
+            # server-config-only startup — default output alongside the config file
+            args.output_dir = Path(args.server_config).parent / "manual_transforms"
 
     # Import napari late — startup takes a moment
     import napari
