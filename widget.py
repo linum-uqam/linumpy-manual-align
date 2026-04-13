@@ -61,6 +61,10 @@ class UndoStack:
     _history: list[AlignmentState] = field(default_factory=lambda: [AlignmentState()])
     _index: int = 0
 
+    def __init__(self, initial: AlignmentState | None = None):
+        self._history = [initial if initial is not None else AlignmentState()]
+        self._index = 0
+
     def push(self, state: AlignmentState) -> None:
         # Discard redo history when a new state is pushed
         self._history = self._history[: self._index + 1]
@@ -103,6 +107,7 @@ class ManualAlignWidget(QWidget):
         level: int = 1,
         filter_slices: list[int] | None = None,
         aips_dir: Path | None = None,
+        server_config: "ServerConfig | None" = None,
     ):
         super().__init__()
         self.viewer = viewer
@@ -111,6 +116,7 @@ class ManualAlignWidget(QWidget):
         self.output_dir = Path(output_dir)
         self.level = level
         self.aips_dir = Path(aips_dir) if aips_dir else None
+        self.server_config = server_config
 
         # Discover slices — from AIP package or OME-Zarr directory
         if self.aips_dir is not None:
@@ -265,6 +271,41 @@ class ManualAlignWidget(QWidget):
 
         layout.addWidget(save_group)
 
+        # -- Server transfer buttons --
+        server_group = QGroupBox("Server")
+        server_layout = QVBoxLayout()
+        server_group.setLayout(server_layout)
+
+        server_btn_layout = QHBoxLayout()
+        self.btn_download = QPushButton("⬇ Download Data")
+        self.btn_download.setToolTip(
+            "Download AIPs and transforms from the server.\n"
+            "Requires SSH access and a --server_config."
+        )
+        self.btn_download.clicked.connect(self._download_from_server)
+        server_btn_layout.addWidget(self.btn_download)
+
+        self.btn_upload = QPushButton("⬆ Upload Transforms")
+        self.btn_upload.setToolTip(
+            "Upload saved manual transforms to the server.\n"
+            "They will be placed in output/manual_transforms/."
+        )
+        self.btn_upload.clicked.connect(self._upload_to_server)
+        server_btn_layout.addWidget(self.btn_upload)
+        server_layout.addLayout(server_btn_layout)
+
+        self.server_status_label = QLabel("")
+        self.server_status_label.setWordWrap(True)
+        server_layout.addWidget(self.server_status_label)
+
+        # Disable buttons if no server config
+        if self.server_config is None:
+            self.btn_download.setEnabled(False)
+            self.btn_upload.setEnabled(False)
+            self.server_status_label.setText("<i>No --server_config provided</i>")
+
+        layout.addWidget(server_group)
+
         # -- Status display --
         self.status_label = QLabel("")
         self.status_label.setWordWrap(True)
@@ -288,6 +329,18 @@ class ManualAlignWidget(QWidget):
         return dict(sorted(aips.items()))
 
     # ----- Pair loading -----
+
+    def _get_automated_state(self, mid: int) -> AlignmentState:
+        """Get the automated transform for a slice as an AlignmentState, or zero state if unavailable."""
+        if mid not in self.existing_transforms:
+            return AlignmentState()
+        tfm_dir = self.existing_transforms[mid]
+        tfm_files = list(tfm_dir.glob("*.tfm"))
+        if not tfm_files:
+            return AlignmentState()
+        tx, ty, rot = load_transform(tfm_files[0])
+        scale = 2**self.level
+        return AlignmentState(tx=tx / scale, ty=ty / scale, rotation=rot)
 
     def _load_pair(self, idx: int) -> None:
         """Load a slice pair and display as red/green AIP overlay."""
@@ -342,7 +395,9 @@ class ManualAlignWidget(QWidget):
 
         # Initialize or restore undo stack
         if mid not in self.undo_stacks:
-            self.undo_stacks[mid] = UndoStack()
+            # Auto-load automated transform as initial state if available
+            initial = self._get_automated_state(mid)
+            self.undo_stacks[mid] = UndoStack(initial)
 
         state = self.undo_stacks[mid].current
         self._apply_state(state, push=False)
@@ -570,6 +625,99 @@ class ManualAlignWidget(QWidget):
         self.viewer.status = f"Saved {count} transforms to {self.output_dir}"
         logger.info(f"Saved {count} manual transforms to {self.output_dir}")
         self.viewer.close()
+
+    # ----- Server transfer -----
+
+    def _download_from_server(self) -> None:
+        """Download the manual alignment data package from the server."""
+        from server_transfer import download_manual_align_package
+
+        if self.server_config is None:
+            return
+
+        self.btn_download.setEnabled(False)
+        self.server_status_label.setText("<i>Downloading...</i>")
+        self.viewer.status = "Downloading data from server..."
+
+        # Determine local destination
+        if self.aips_dir is not None:
+            local_dir = self.aips_dir.parent
+        else:
+            local_dir = self.output_dir.parent / "server_package"
+
+        ok, msg = download_manual_align_package(self.server_config, local_dir, self.level)
+        self.server_status_label.setText(msg)
+        self.viewer.status = msg
+        self.btn_download.setEnabled(True)
+
+        if ok:
+            # Reload AIPs from downloaded package
+            pkg_aips = local_dir / "manual_align_package" / "aips"
+            if not pkg_aips.exists():
+                pkg_aips = local_dir / "aips"
+            if pkg_aips.exists():
+                self.aips_dir = pkg_aips
+                self.slice_paths = self._discover_aips(pkg_aips)
+                self._use_precomputed_aips = True
+                self.slice_ids = list(self.slice_paths.keys())
+                # Reload transforms too if available
+                pkg_tfm = local_dir / "manual_align_package" / "transforms"
+                if not pkg_tfm.exists():
+                    pkg_tfm = local_dir / "transforms"
+                if pkg_tfm.exists():
+                    self.transforms_dir = pkg_tfm
+                    self.existing_transforms = discover_transforms(pkg_tfm)
+                # Rebuild pairs and reload
+                self._rebuild_pairs()
+
+    def _upload_to_server(self) -> None:
+        """Upload saved manual transforms to the server."""
+        from server_transfer import upload_manual_transforms
+
+        if self.server_config is None:
+            return
+
+        if not self.output_dir.exists() or not list(self.output_dir.glob("slice_z*")):
+            self.server_status_label.setText("No saved transforms to upload")
+            return
+
+        self.btn_upload.setEnabled(False)
+        self.server_status_label.setText("<i>Uploading...</i>")
+        self.viewer.status = "Uploading transforms to server..."
+
+        ok, msg = upload_manual_transforms(self.server_config, self.output_dir)
+        self.server_status_label.setText(msg)
+        self.viewer.status = msg
+        self.btn_upload.setEnabled(True)
+
+    def _rebuild_pairs(self) -> None:
+        """Rebuild pair list after slice discovery changes, then reload UI."""
+        old_filter = None  # No filter after download — show all
+        self.pairs = []
+        for i in range(len(self.slice_ids) - 1):
+            fid, mid = self.slice_ids[i], self.slice_ids[i + 1]
+            self.pairs.append((fid, mid))
+
+        if not self.pairs:
+            self.viewer.status = "No slice pairs found after download"
+            return
+
+        # Rebuild combo box
+        self.pair_combo.blockSignals(True)
+        self.pair_combo.clear()
+        for fid, mid in self.pairs:
+            label = f"z{fid:02d} → z{mid:02d}"
+            if mid in self.existing_transforms:
+                metrics_path = self.existing_transforms[mid] / "pairwise_registration_metrics.json"
+                metrics = load_pairwise_metrics(metrics_path)
+                mag = self._get_metric(metrics, "translation_magnitude")
+                if mag is not None:
+                    label += f"  (mag={mag:.0f}px)"
+            self.pair_combo.addItem(label)
+        self.pair_combo.blockSignals(False)
+
+        self.current_pair_idx = 0
+        self._load_pair(0)
 
     # ----- Status display -----
 

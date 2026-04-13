@@ -78,6 +78,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Path to a data package exported by linum_export_manual_align.py.\n"
         "When used, --input_dir and --transforms_dir are read from the package.",
     )
+    p.add_argument(
+        "--server_config",
+        type=Path,
+        default=None,
+        help="Path to a local nextflow.config (e.g. ~/Downloads/sub-22/nextflow.config).\n"
+        "Enables download/upload buttons in the UI for server interaction.",
+    )
     return p.parse_args(argv)
 
 
@@ -117,6 +124,13 @@ def main(argv: list[str] | None = None) -> None:
     import napari
     from widget import ManualAlignWidget
 
+    # Parse server config if provided
+    server_config = None
+    if args.server_config is not None:
+        from server_transfer import parse_server_config
+
+        server_config = parse_server_config(args.server_config)
+
     viewer = napari.Viewer(title="Manual Slice Alignment")
 
     widget = ManualAlignWidget(
@@ -127,6 +141,7 @@ def main(argv: list[str] | None = None) -> None:
         level=args.level,
         filter_slices=args.slices,
         aips_dir=aips_dir,
+        server_config=server_config,
     )
     viewer.window.add_dock_widget(widget, name="Manual Align", area="right")
 
