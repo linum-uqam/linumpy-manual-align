@@ -9,10 +9,10 @@ in the [linumpy](https://github.com/linum-uqam/linumpy) reconstruction pipeline.
 
 ```bash
 # From GitHub:
-pip install git+https://github.com/linum-uqam/linumpy-manual-align.git
+uv pip install git+https://github.com/linum-uqam/linumpy-manual-align.git
 
 # With OME-Zarr support (requires linumpy):
-pip install "linumpy-manual-align[zarr] @ git+https://github.com/linum-uqam/linumpy-manual-align.git"
+uv pip install "linumpy-manual-align[zarr] @ git+https://github.com/linum-uqam/linumpy-manual-align.git"
 
 # For development:
 git clone https://github.com/linum-uqam/linumpy-manual-align.git
@@ -22,10 +22,11 @@ uv pip install -e ".[dev]"
 
 ## Usage
 
-### With a data package (recommended — no linumpy needed)
+### With a data package (recommended)
 
-First export a data package on the server using `linum_export_manual_align.py`
-(included in linumpy), then download and align locally:
+The reconstruction pipeline exports a lightweight data package via
+`linum_export_manual_align.py` (on the server). Download the package
+locally, then align without needing linumpy installed:
 
 ```bash
 linumpy-manual-align \
@@ -71,11 +72,11 @@ linumpy-manual-align \
 
 ```bash
 # Lint and format
-ruff check src/ && ruff format --check src/
+uv run ruff check src/ && uv run ruff format --check src/
 
 # Type check
-ty check src/
+uv run ty check src/
 
 # Run tests
-pytest tests/ -v
+uv run pytest tests/ -v
 ```
