@@ -30,6 +30,7 @@ from qtpy.QtWidgets import (
     QWidget,
 )
 from scipy.ndimage import rotate as ndimage_rotate
+
 from linumpy_manual_align.transform_io import (
     discover_slices,
     discover_transforms,
@@ -107,7 +108,7 @@ class ManualAlignWidget(QWidget):
         level: int = 1,
         filter_slices: list[int] | None = None,
         aips_dir: Path | None = None,
-        server_config: "ServerConfig | None" = None,
+        server_config: object = None,
     ):
         super().__init__()
         self.viewer = viewer
@@ -279,16 +280,14 @@ class ManualAlignWidget(QWidget):
         server_btn_layout = QHBoxLayout()
         self.btn_download = QPushButton("⬇ Download Data")
         self.btn_download.setToolTip(
-            "Download AIPs and transforms from the server.\n"
-            "Requires SSH access and a --server_config."
+            "Download AIPs and transforms from the server.\nRequires SSH access and a --server_config."
         )
         self.btn_download.clicked.connect(self._download_from_server)
         server_btn_layout.addWidget(self.btn_download)
 
         self.btn_upload = QPushButton("⬆ Upload Transforms")
         self.btn_upload.setToolTip(
-            "Upload saved manual transforms to the server.\n"
-            "They will be placed in output/manual_transforms/."
+            "Upload saved manual transforms to the server.\nThey will be placed in output/manual_transforms/."
         )
         self.btn_upload.clicked.connect(self._upload_to_server)
         server_btn_layout.addWidget(self.btn_upload)
@@ -640,10 +639,7 @@ class ManualAlignWidget(QWidget):
         self.viewer.status = "Downloading data from server..."
 
         # Determine local destination
-        if self.aips_dir is not None:
-            local_dir = self.aips_dir.parent
-        else:
-            local_dir = self.output_dir.parent / "server_package"
+        local_dir = self.aips_dir.parent if self.aips_dir is not None else self.output_dir.parent / "server_package"
 
         ok, msg = download_manual_align_package(self.server_config, local_dir, self.level)
         self.server_status_label.setText(msg)
@@ -685,14 +681,13 @@ class ManualAlignWidget(QWidget):
         self.server_status_label.setText("<i>Uploading...</i>")
         self.viewer.status = "Uploading transforms to server..."
 
-        ok, msg = upload_manual_transforms(self.server_config, self.output_dir)
+        _ok, msg = upload_manual_transforms(self.server_config, self.output_dir)
         self.server_status_label.setText(msg)
         self.viewer.status = msg
         self.btn_upload.setEnabled(True)
 
     def _rebuild_pairs(self) -> None:
         """Rebuild pair list after slice discovery changes, then reload UI."""
-        old_filter = None  # No filter after download — show all
         self.pairs = []
         for i in range(len(self.slice_ids) - 1):
             fid, mid = self.slice_ids[i], self.slice_ids[i + 1]

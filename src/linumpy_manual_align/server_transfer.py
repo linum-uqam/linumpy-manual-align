@@ -63,7 +63,7 @@ def parse_server_config(config_path: Path) -> ServerConfig | None:
 
 def _run_scp(args: list[str], description: str) -> tuple[bool, str]:
     """Run an scp command and return (success, message)."""
-    cmd = ["scp"] + args
+    cmd = ["scp", *args]
     logger.info(f"Running: {' '.join(cmd)}")
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)

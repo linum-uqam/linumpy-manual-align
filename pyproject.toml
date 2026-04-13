@@ -30,9 +30,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Install with: pip install linumpy-manual-align[zarr]
-# Required only when loading directly from OME-Zarr volumes (--input_dir mode)
 zarr = ["linumpy"]
+dev = ["ruff", "ty"]
 
 [project.scripts]
 linumpy-manual-align = "linumpy_manual_align.__main__:main"
@@ -43,3 +42,28 @@ Repository = "https://github.com/linum-uqam/linumpy-manual-align"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/linumpy_manual_align"]
+
+# --- ruff ---
+[tool.ruff]
+target-version = "py312"
+line-length = 127
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "RUF", "SIM", "C4", "PIE", "PTH"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["linumpy_manual_align"]
+
+[tool.ruff.format]
+# Use default (black-compatible) formatting
+
+# --- ty ---
+[tool.ty.environment]
+python-version = "3.12"
+extra-paths = ["src"]
+
+[tool.ty.rules]
+possibly-unresolved-reference = "error"
+
+[tool.ty.analysis]
+replace-imports-with-any = ["linumpy.**", "napari.**", "numpy.**", "scipy.**", "SimpleITK.**", "qtpy.**"]

@@ -37,8 +37,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--input_dir",
         type=Path,
         default=None,
-        help="Directory with common-space slices (slice_z##.ome.zarr).\n"
-        "Not needed when --data_package is used.",
+        help="Directory with common-space slices (slice_z##.ome.zarr).\nNot needed when --data_package is used.",
     )
     p.add_argument(
         "--transforms_dir",
