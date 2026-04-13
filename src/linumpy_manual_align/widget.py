@@ -28,6 +28,7 @@ from qtpy.QtWidgets import (
     QLabel,
     QLineEdit,
     QMessageBox,
+    QProgressBar,
     QPushButton,
     QSlider,
     QVBoxLayout,
@@ -204,6 +205,12 @@ class ManualAlignWidget(QWidget):
         if self.pairs:
             self._load_pair(0)
         else:
+            # No data yet — check if an existing package is already on disk
+            if self.server_config is not None and not self.pairs:
+                existing = self._find_existing_package()
+                if existing is not None:
+                    self._load_existing_package(existing)
+                    self.server_status_label.setText(f"Existing package loaded from {existing.parent}")
             self._update_status()
 
     # ----- UI construction -----
@@ -278,6 +285,40 @@ class ManualAlignWidget(QWidget):
         ctrl_layout.addRow("", self.rot_slider)
 
         layout.addWidget(ctrl_group)
+
+        # -- Display controls --
+        display_group = QGroupBox("Display")
+        display_layout = QFormLayout()
+        display_group.setLayout(display_layout)
+
+        self.spin_gamma = QDoubleSpinBox()
+        self.spin_gamma.setRange(0.1, 2.0)
+        self.spin_gamma.setDecimals(2)
+        self.spin_gamma.setSingleStep(0.05)
+        self.spin_gamma.setValue(0.6)
+        self.spin_gamma.setToolTip("Gamma correction for both layers (< 1 boosts midtones)")
+        self.spin_gamma.valueChanged.connect(self._on_gamma_changed)
+        display_layout.addRow("Gamma:", self.spin_gamma)
+
+        self.spin_opacity_moving = QDoubleSpinBox()
+        self.spin_opacity_moving.setRange(0.1, 1.0)
+        self.spin_opacity_moving.setDecimals(2)
+        self.spin_opacity_moving.setSingleStep(0.05)
+        self.spin_opacity_moving.setValue(1.0)
+        self.spin_opacity_moving.setToolTip("Opacity of the moving (red) layer")
+        self.spin_opacity_moving.valueChanged.connect(self._on_opacity_moving_changed)
+        display_layout.addRow("Moving opacity:", self.spin_opacity_moving)
+
+        self.spin_opacity_fixed = QDoubleSpinBox()
+        self.spin_opacity_fixed.setRange(0.1, 1.0)
+        self.spin_opacity_fixed.setDecimals(2)
+        self.spin_opacity_fixed.setSingleStep(0.05)
+        self.spin_opacity_fixed.setValue(1.0)
+        self.spin_opacity_fixed.setToolTip("Opacity of the fixed (green) layer")
+        self.spin_opacity_fixed.valueChanged.connect(self._on_opacity_fixed_changed)
+        display_layout.addRow("Fixed opacity:", self.spin_opacity_fixed)
+
+        layout.addWidget(display_group)
 
         # -- Action buttons --
         action_group = QGroupBox("Actions")
@@ -356,6 +397,13 @@ class ManualAlignWidget(QWidget):
         self.btn_upload.clicked.connect(self._upload_to_server)
         server_btn_layout.addWidget(self.btn_upload)
         server_layout.addLayout(server_btn_layout)
+
+        self.server_progress = QProgressBar()
+        self.server_progress.setRange(0, 0)  # indeterminate pulse
+        self.server_progress.setTextVisible(False)
+        self.server_progress.setFixedHeight(6)
+        self.server_progress.hide()
+        server_layout.addWidget(self.server_progress)
 
         self.server_status_label = QLabel("")
         self.server_status_label.setWordWrap(True)
@@ -449,6 +497,9 @@ class ManualAlignWidget(QWidget):
 
         # Compute shared contrast limits from both AIPs
         clim = (0.0, 1.0)
+        gamma = self.spin_gamma.value()
+        opacity_fixed = self.spin_opacity_fixed.value()
+        opacity_moving = self.spin_opacity_moving.value()
 
         # Add layers: fixed (green) then moving (red) on top
         self.fixed_layer = self.viewer.add_image(
@@ -457,6 +508,8 @@ class ManualAlignWidget(QWidget):
             colormap="green",
             blending="additive",
             contrast_limits=clim,
+            gamma=gamma,
+            opacity=opacity_fixed,
             scale=fixed_scale_yx,
         )
         self.moving_layer = self.viewer.add_image(
@@ -465,6 +518,8 @@ class ManualAlignWidget(QWidget):
             colormap="red",
             blending="additive",
             contrast_limits=clim,
+            gamma=gamma,
+            opacity=opacity_moving,
             scale=moving_scale_yx,
         )
 
@@ -507,8 +562,8 @@ class ManualAlignWidget(QWidget):
         return aip, list(scale[1:])  # YX only
 
     def _normalize(self, img: np.ndarray) -> np.ndarray:
-        p_low = np.percentile(img[img > 0], 0.1) if np.any(img > 0) else 0
-        p_high = np.percentile(img, 99.9)
+        p_low = np.percentile(img[img > 0], 1) if np.any(img > 0) else 0
+        p_high = np.percentile(img, 99)
         if p_high <= p_low:
             return np.zeros_like(img)
         return np.clip((img - p_low) / (p_high - p_low), 0, 1).astype(np.float32)
@@ -747,6 +802,7 @@ class ManualAlignWidget(QWidget):
 
         self.btn_download.setEnabled(False)
         self.btn_upload.setEnabled(False)
+        self.server_progress.show()
         self.server_status_label.setText("<i>Downloading...</i>")
         self.viewer.status = "Downloading data from server..."
 
@@ -759,6 +815,7 @@ class ManualAlignWidget(QWidget):
 
     def _on_download_finished(self, ok: bool, msg: str, local_dir: Path) -> None:
         """Handle completion of background download."""
+        self.server_progress.hide()
         self.server_status_label.setText(msg)
         self.viewer.status = msg
         self.btn_download.setEnabled(True)
@@ -797,6 +854,7 @@ class ManualAlignWidget(QWidget):
 
         self.btn_download.setEnabled(False)
         self.btn_upload.setEnabled(False)
+        self.server_progress.show()
         self.server_status_label.setText("<i>Uploading...</i>")
         self.viewer.status = "Uploading transforms to server..."
 
@@ -806,6 +864,7 @@ class ManualAlignWidget(QWidget):
 
     def _on_upload_finished(self, ok: bool, msg: str) -> None:
         """Handle completion of background upload."""
+        self.server_progress.hide()
         self.server_status_label.setText(msg)
         self.viewer.status = msg
         self.btn_download.setEnabled(True)
@@ -855,6 +914,13 @@ class ManualAlignWidget(QWidget):
         lines = [f"<b>Pair {self.current_pair_idx + 1}/{len(self.pairs)}: z{fid:02d} → z{mid:02d}</b>"]
         lines.append(f"Working res (level {self.level}): tx={state.tx:.1f}  ty={state.ty:.1f}  rot={state.rotation:.2f}°")
         lines.append(f"Full res (level 0): tx={state.tx * scale:.1f}  ty={state.ty * scale:.1f}  rot={state.rotation:.2f}°")
+        hint = (
+            "<i style='color: grey;'>"
+            "Arrow: 1px · Shift+Arrow: 10px · Ctrl+Arrow: 50px"
+            " · [/]: 0.1° · Shift+[/]: 1° · Ctrl+[/]: 5°"
+            "</i>"
+        )
+        lines.append(hint)
 
         # Show automated metrics if available
         if mid in self.existing_transforms:
@@ -950,6 +1016,23 @@ class ManualAlignWidget(QWidget):
         def _down10(viewer):
             self._nudge_translate(0, 10)
 
+        # Large translation (50px)
+        @viewer.bind_key("Control-Right")
+        def _right50(viewer):
+            self._nudge_translate(50, 0)
+
+        @viewer.bind_key("Control-Left")
+        def _left50(viewer):
+            self._nudge_translate(-50, 0)
+
+        @viewer.bind_key("Control-Up")
+        def _up50(viewer):
+            self._nudge_translate(0, -50)
+
+        @viewer.bind_key("Control-Down")
+        def _down50(viewer):
+            self._nudge_translate(0, 50)
+
         # Rotation
         @viewer.bind_key("]")
         def _rot_cw(viewer):
@@ -967,6 +1050,14 @@ class ManualAlignWidget(QWidget):
         def _rot_ccw_coarse(viewer):
             self._nudge_rotate(-1.0)
 
+        @viewer.bind_key("Control-]")
+        def _rot_cw_large(viewer):
+            self._nudge_rotate(5.0)
+
+        @viewer.bind_key("Control-[")
+        def _rot_ccw_large(viewer):
+            self._nudge_rotate(-5.0)
+
         # Undo/redo (Ctrl+Z / Ctrl+Shift+Z)
         @viewer.bind_key("Control-z")
         def _undo(viewer):
@@ -975,6 +1066,20 @@ class ManualAlignWidget(QWidget):
         @viewer.bind_key("Control-Shift-z")
         def _redo(viewer):
             self._redo()
+
+    def _on_gamma_changed(self, value: float) -> None:
+        if self.fixed_layer is not None:
+            self.fixed_layer.gamma = value
+        if self.moving_layer is not None:
+            self.moving_layer.gamma = value
+
+    def _on_opacity_moving_changed(self, value: float) -> None:
+        if self.moving_layer is not None:
+            self.moving_layer.opacity = value
+
+    def _on_opacity_fixed_changed(self, value: float) -> None:
+        if self.fixed_layer is not None:
+            self.fixed_layer.opacity = value
 
     def _nudge_translate(self, dx: float, dy: float) -> None:
         state = self._current_state()
@@ -1015,14 +1120,23 @@ class ManualAlignWidget(QWidget):
         if not self.unsaved_changes:
             return True
         n = len(self.unsaved_changes)
-        reply = QMessageBox.question(
-            self,
-            "Unsaved Changes",
-            f"{n} modified pair(s) have unsaved changes.\nClose without saving?",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No,
-        )
-        return reply == QMessageBox.Yes
+        msg = QMessageBox(self)
+        msg.setWindowTitle("Unsaved Changes")
+        msg.setText(f"{n} modified pair(s) have unsaved changes.")
+        msg.setInformativeText("Save all before closing?")
+        msg.setIcon(QMessageBox.Warning)
+        save_btn = msg.addButton("Save All && Close", QMessageBox.AcceptRole)
+        msg.addButton("Discard && Close", QMessageBox.DestructiveRole)
+        cancel_btn = msg.addButton("Cancel", QMessageBox.RejectRole)
+        msg.setDefaultButton(save_btn)
+        msg.exec_()
+        clicked = msg.clickedButton()
+        if clicked is cancel_btn:
+            return False
+        if clicked is save_btn:
+            self._save_all_and_exit()
+            return False  # _save_all_and_exit handles close itself
+        return True  # Discard
 
     # ----- Server config GUI -----
 
@@ -1054,7 +1168,46 @@ class ManualAlignWidget(QWidget):
         self.host_edit.setText(cfg.host)
         self.btn_download.setEnabled(True)
         self.btn_upload.setEnabled(True)
-        self.server_status_label.setText(f"Configured: {cfg.subject_id} @ {cfg.host}")
+
+        # Re-anchor output_dir to the config's parent so paths resolve correctly
+        self.output_dir = config_path.parent / "manual_transforms"
+
+        # Check if a package was already downloaded for this config
+        existing = self._find_existing_package()
+        if existing is not None:
+            self.server_status_label.setText(
+                f"Configured: {cfg.subject_id} @ {cfg.host} — existing package found at {existing}, loading…"
+            )
+            self._load_existing_package(existing)
+        else:
+            self.server_status_label.setText(f"Configured: {cfg.subject_id} @ {cfg.host}")
+
+    def _find_existing_package(self) -> Path | None:
+        """Return the aips/ dir of an already-downloaded package, or None."""
+        candidates = [
+            self.output_dir.parent / "server_package" / "manual_align_package" / "aips",
+            self.output_dir.parent / "server_package" / "aips",
+        ]
+        for path in candidates:
+            if path.exists() and any(path.glob("*.npz")):
+                return path
+        return None
+
+    def _load_existing_package(self, aips_dir: Path) -> None:
+        """Load a previously downloaded package without hitting the server."""
+        self.aips_dir = aips_dir
+        self.slice_paths = self._discover_aips(aips_dir)
+        self._use_precomputed_aips = True
+        self.slice_ids = list(self.slice_paths.keys())
+
+        # Load transforms alongside the aips if present
+        for tfm_candidate in (aips_dir.parent / "transforms", aips_dir.parent.parent / "transforms"):
+            if tfm_candidate.exists():
+                self.transforms_dir = tfm_candidate
+                self.existing_transforms = discover_transforms(tfm_candidate)
+                break
+
+        self._rebuild_pairs()
 
     def _on_host_changed(self, text: str) -> None:
         """Update server config host when the user edits the host field."""

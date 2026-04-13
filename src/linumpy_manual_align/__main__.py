@@ -109,7 +109,32 @@ def main(argv: list[str] | None = None) -> None:
             if args.level == 1 and "pyramid_level" in metadata:
                 args.level = metadata["pyramid_level"]
     elif args.input_dir is None and args.server_config is None:
-        raise ValueError("Either --input_dir, --data_package, or --server_config is required.")
+        from qtpy.QtWidgets import QApplication, QFileDialog, QMessageBox
+
+        _app = QApplication.instance() or QApplication([])
+        choice, _ = QFileDialog.getOpenFileName(
+            None,
+            "Open data package or server config",
+            str(Path.home()),
+            "Supported files (*.json *.config);;All files (*)",
+        )
+        if not choice:
+            QMessageBox.critical(None, "No input", "Either --input_dir, --data_package, or --server_config is required.")
+            return
+        chosen = Path(choice)
+        if chosen.suffix == ".config":
+            args.server_config = chosen
+        else:
+            # Assume it's inside a data package — go up to the package root
+            args.data_package = chosen.parent if chosen.name != chosen.parent.name else chosen
+            pkg = Path(args.data_package)
+            aips_dir = pkg / "aips"
+            if not aips_dir.exists():
+                raise FileNotFoundError(f"AIPs directory not found in data package: {aips_dir}")
+            if args.transforms_dir is None:
+                pkg_tfm = pkg / "transforms"
+                if pkg_tfm.exists():
+                    args.transforms_dir = pkg_tfm
 
     if args.output_dir is None:
         if args.data_package is not None:
