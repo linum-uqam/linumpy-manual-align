@@ -5,6 +5,10 @@
 Napari-based interactive tool for manually correcting pairwise slice alignment
 in the [linumpy](https://github.com/linum-uqam/linumpy) reconstruction pipeline.
 
+## Documentation
+
+- [Napari plugin + Nextflow integration guide](docs/napari-plugin-nextflow-guide.md)
+
 ## Installation
 
 ```bash
