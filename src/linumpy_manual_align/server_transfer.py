@@ -3,6 +3,9 @@
 Provides download (make_manual_align_package output from server) and upload
 (manual transforms back to server) via SCP, using connection details
 parsed from a subject's nextflow.config.
+
+Also exposes ``ScpWorker``, a thin ``QThread`` wrapper that runs a transfer
+function on a background thread so the Qt event loop stays responsive.
 """
 
 from __future__ import annotations
@@ -13,7 +16,27 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from qtpy.QtCore import QThread, Signal
+
 logger = logging.getLogger(__name__)
+
+
+class ScpWorker(QThread):
+    """Background QThread for SCP download/upload operations.
+
+    Emits ``finished(ok, message)`` when the transfer completes.
+    """
+
+    finished = Signal(bool, str)
+
+    def __init__(self, func: object, args: tuple) -> None:
+        super().__init__()
+        self._func = func
+        self._args = args
+
+    def run(self) -> None:
+        ok, msg = self._func(*self._args)
+        self.finished.emit(ok, msg)
 
 
 @dataclass

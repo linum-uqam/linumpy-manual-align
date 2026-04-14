@@ -10,14 +10,14 @@ the linumpy stacking pipeline.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import sys
-from dataclasses import dataclass, field
 from pathlib import Path
 
 import napari
 import numpy as np
-from qtpy.QtCore import Qt, QThread, Signal
+from qtpy.QtCore import Qt
 from qtpy.QtWidgets import (
     QComboBox,
     QDoubleSpinBox,
@@ -37,9 +37,18 @@ from qtpy.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from scipy.ndimage import rotate as ndimage_rotate
 
+from linumpy_manual_align.image_utils import (
+    OVERLAY_CHECKER,
+    OVERLAY_COLOR,
+    OVERLAY_DIFF,
+    apply_transform,
+    build_overlay,
+    normalize_aip,
+)
 from linumpy_manual_align.omezarr_io import load_aip_from_ome_zarr
+from linumpy_manual_align.server_transfer import ScpWorker
+from linumpy_manual_align.state import AlignmentState, UndoStack
 from linumpy_manual_align.transform_io import (
     discover_slices,
     discover_transforms,
@@ -54,83 +63,6 @@ logger = logging.getLogger(__name__)
 _IS_MACOS = sys.platform == "darwin"
 _UNDO_LABEL = "Undo (⌘Z)" if _IS_MACOS else "Undo (Ctrl+Z)"
 _REDO_LABEL = "Redo (⌘⇧Z)" if _IS_MACOS else "Redo (Ctrl+Shift+Z)"
-
-_MAX_UNDO_HISTORY = 500
-
-# ---------------------------------------------------------------------------
-# Undo / redo
-# ---------------------------------------------------------------------------
-
-
-@dataclass
-class AlignmentState:
-    """Snapshot of alignment parameters for one slice pair."""
-
-    tx: float = 0.0
-    ty: float = 0.0
-    rotation: float = 0.0
-
-
-@dataclass
-class UndoStack:
-    """Simple linear undo/redo stack per slice pair."""
-
-    _history: list[AlignmentState] = field(default_factory=lambda: [AlignmentState()])
-    _index: int = 0
-
-    def __init__(self, initial: AlignmentState | None = None):
-        self._history = [initial if initial is not None else AlignmentState()]
-        self._index = 0
-
-    def push(self, state: AlignmentState) -> None:
-        # Discard redo history when a new state is pushed
-        self._history = self._history[: self._index + 1]
-        self._history.append(AlignmentState(state.tx, state.ty, state.rotation))
-        self._index = len(self._history) - 1
-        # Enforce maximum history size
-        if len(self._history) > _MAX_UNDO_HISTORY:
-            trim = len(self._history) - _MAX_UNDO_HISTORY
-            self._history = self._history[trim:]
-            self._index -= trim
-
-    def undo(self) -> AlignmentState | None:
-        if self._index > 0:
-            self._index -= 1
-            s = self._history[self._index]
-            return AlignmentState(s.tx, s.ty, s.rotation)
-        return None
-
-    def redo(self) -> AlignmentState | None:
-        if self._index < len(self._history) - 1:
-            self._index += 1
-            s = self._history[self._index]
-            return AlignmentState(s.tx, s.ty, s.rotation)
-        return None
-
-    @property
-    def current(self) -> AlignmentState:
-        return self._history[self._index]
-
-
-# ---------------------------------------------------------------------------
-# Background worker for server operations
-# ---------------------------------------------------------------------------
-
-
-class _ScpWorker(QThread):
-    """Background QThread for SCP download/upload operations."""
-
-    finished = Signal(bool, str)
-
-    def __init__(self, func: object, args: tuple) -> None:
-        super().__init__()
-        self._func = func
-        self._args = args
-
-    def run(self) -> None:
-        ok, msg = self._func(*self._args)
-        self.finished.emit(ok, msg)
-
 
 # ---------------------------------------------------------------------------
 # Widget
@@ -202,16 +134,21 @@ class ManualAlignWidget(QWidget):
         # Layers (set during pair loading)
         self.fixed_layer: napari.layers.Image | None = None
         self.moving_layer: napari.layers.Image | None = None
+        self._composite_layer: napari.layers.Image | None = None
+        self._original_fixed_aip: np.ndarray | None = None
         self._original_moving_aip: np.ndarray | None = None  # before rotation
         self._suppress_translate_event = False
         self._suppress_spinbox_event = False
         self._suppress_z_offset_event = False
-        self._worker: _ScpWorker | None = None  # prevent GC of background thread
+        self._worker: ScpWorker | None = None  # prevent GC of background thread
         self._close_confirmed = False
 
         # Projection mode and Z-overlap state
         self._projection_mode = "xy"  # "xy", "xz", "yz"
         self._current_offsets: dict[int, tuple[int, int]] = {}  # mid -> (fixed_z, moving_z)
+
+        # Overlay display mode
+        self._overlay_mode = OVERLAY_COLOR
 
         # Current pair index
         self.current_pair_idx = 0
@@ -427,6 +364,27 @@ class ManualAlignWidget(QWidget):
         disp_form = self._form()
         disp_group.setLayout(disp_form)
 
+        self.combo_overlay = QComboBox()
+        self.combo_overlay.addItems(["Color (R/G)", "Difference", "Checkerboard"])
+        self.combo_overlay.setToolTip(
+            "Color: additive red/green overlay\n"
+            "Difference: |fixed - moving| grayscale (misalignment = bright)\n"
+            "Checkerboard: alternating tiles of fixed/moving"
+        )
+        self.combo_overlay.currentIndexChanged.connect(self._on_overlay_mode_changed)
+        disp_form.addRow("Overlay:", self.combo_overlay)
+
+        self.spin_tile = QSpinBox()
+        self.spin_tile.setRange(2, 512)
+        self.spin_tile.setValue(16)
+        self.spin_tile.setSingleStep(4)
+        self.spin_tile.setToolTip("Checkerboard tile size (pixels at current pyramid level)")
+        self.spin_tile.valueChanged.connect(self._on_tile_size_changed)
+        self._tile_row_label = QLabel("Tile size:")
+        disp_form.addRow(self._tile_row_label, self.spin_tile)
+        self._tile_row_label.setVisible(False)
+        self.spin_tile.setVisible(False)
+
         self.spin_gamma = QDoubleSpinBox()
         self.spin_gamma.setRange(0.1, 2.0)
         self.spin_gamma.setDecimals(2)
@@ -617,13 +575,15 @@ class ManualAlignWidget(QWidget):
         fixed_aip = self._normalize(fixed_aip)
         moving_aip = self._normalize(moving_aip)
 
+        self._original_fixed_aip = fixed_aip.copy()
         self._original_moving_aip = moving_aip.copy()
 
         # Store image center for this pair (only from XY view, needed for rotation)
         if self._projection_mode == "xy":
             self.pair_centers[mid] = (moving_aip.shape[1] / 2.0, moving_aip.shape[0] / 2.0)  # (cx, cy)
 
-        # Remove existing layers
+        # Remove existing layers (including stale composite)
+        self._composite_layer = None
         while len(self.viewer.layers) > 0:
             self.viewer.layers.pop(0)
 
@@ -635,7 +595,7 @@ class ManualAlignWidget(QWidget):
 
         view_suffix = {"xy": "", "xz": " (XZ)", "yz": " (YZ)"}.get(self._projection_mode, "")
 
-        # Add layers: fixed (green) then moving (red) on top
+        # Always add both individual layers (hidden in non-color modes)
         self.fixed_layer = self.viewer.add_image(
             fixed_aip,
             name=f"Fixed z{fid:02d}{view_suffix}",
@@ -656,6 +616,9 @@ class ManualAlignWidget(QWidget):
             opacity=opacity_moving,
             scale=moving_scale_yx,
         )
+
+        # Adjust visibility / add composite layer based on current overlay mode
+        self._rebuild_layer_visibility()
 
         # Connect layer translate events for bidirectional sync (XY mode only)
         self.moving_layer.events.translate.connect(self._on_layer_translated)
@@ -705,11 +668,57 @@ class ManualAlignWidget(QWidget):
         return load_aip_from_ome_zarr(zarr_path, level=self.level)
 
     def _normalize(self, img: np.ndarray) -> np.ndarray:
-        p_low = np.percentile(img[img > 0], 1) if np.any(img > 0) else 0
-        p_high = np.percentile(img, 99)
-        if p_high <= p_low:
-            return np.zeros_like(img)
-        return np.clip((img - p_low) / (p_high - p_low), 0, 1).astype(np.float32)
+        return normalize_aip(img)
+
+    # ----- Overlay helpers -----
+
+    def _make_shifted_moving(self, state: AlignmentState) -> np.ndarray:
+        """Return the moving AIP with rotation + pixel-level shift baked in."""
+        moving = self._original_moving_aip
+        if moving is None:
+            return np.zeros((1, 1), dtype=np.float32)
+        return apply_transform(moving, rotation=state.rotation, tx=state.tx, ty=state.ty)
+
+    def _compute_composite(self, fixed: np.ndarray, shifted_moving: np.ndarray) -> np.ndarray:
+        """Build a composite image for Difference or Checkerboard overlay modes."""
+        return build_overlay(fixed, shifted_moving, mode=self._overlay_mode, tile_size=self.spin_tile.value())
+
+    def _rebuild_layer_visibility(self) -> None:
+        """Show/hide individual layers and manage composite layer for current overlay mode."""
+        is_color = self._overlay_mode == OVERLAY_COLOR
+
+        if self.fixed_layer is not None:
+            self.fixed_layer.visible = is_color
+        if self.moving_layer is not None:
+            self.moving_layer.visible = is_color
+
+        # Remove stale composite layer
+        if self._composite_layer is not None:
+            with contextlib.suppress(ValueError):
+                self.viewer.layers.remove(self._composite_layer)
+            self._composite_layer = None
+
+        if not is_color and self._original_fixed_aip is not None and self.fixed_layer is not None:
+            colormap = "inferno" if self._overlay_mode == OVERLAY_DIFF else "gray"
+            comp = np.zeros_like(self._original_fixed_aip)
+            self._composite_layer = self.viewer.add_image(
+                comp,
+                name="Composite",
+                colormap=colormap,
+                blending="translucent",
+                contrast_limits=(0.0, 1.0),
+                gamma=self.spin_gamma.value(),
+                scale=list(self.fixed_layer.scale),
+            )
+
+    def _refresh_composite(self, state: AlignmentState) -> None:
+        """Recompute and push composite image data for non-color overlay modes."""
+        if self._overlay_mode == OVERLAY_COLOR or self._composite_layer is None:
+            return
+        if self._original_fixed_aip is None or self._original_moving_aip is None:
+            return
+        shifted = self._make_shifted_moving(state)
+        self._composite_layer.data = self._compute_composite(self._original_fixed_aip, shifted)
 
     # ----- State application -----
 
@@ -725,14 +734,8 @@ class ManualAlignWidget(QWidget):
             self.unsaved_changes.add(mid)
 
         if self._projection_mode == "xy":
-            # Apply rotation to image data
-            if abs(state.rotation) > 0.01:
-                rotated = ndimage_rotate(
-                    self._original_moving_aip, -state.rotation, reshape=False, order=1, mode="constant", cval=0
-                )
-            else:
-                rotated = self._original_moving_aip.copy()
-
+            # Apply rotation to image data (translation handled via layer.translate)
+            rotated = apply_transform(self._original_moving_aip, rotation=state.rotation)
             self.moving_layer.data = rotated
 
             # Apply translation via layer translate
@@ -755,6 +758,10 @@ class ManualAlignWidget(QWidget):
             else:  # yz
                 self.moving_layer.translate = [dz_display * scale[0], state.ty * scale[1]]
             self._suppress_translate_event = False
+
+        # Update composite overlay if active
+        if self._overlay_mode != OVERLAY_COLOR and self._projection_mode == "xy":
+            self._refresh_composite(state)
 
         # Sync spinboxes
         self._suppress_spinbox_event = True
@@ -1014,7 +1021,7 @@ class ManualAlignWidget(QWidget):
         # Determine local destination
         local_dir = self.aips_dir.parent if self.aips_dir is not None else self.output_dir.parent / "server_package"
 
-        self._worker = _ScpWorker(download_manual_align_package, (self.server_config, local_dir, self.level))
+        self._worker = ScpWorker(download_manual_align_package, (self.server_config, local_dir, self.level))
         self._worker.finished.connect(lambda ok, msg: self._on_download_finished(ok, msg, local_dir))
         self._worker.start()
 
@@ -1067,7 +1074,7 @@ class ManualAlignWidget(QWidget):
         self.server_status_label.setText("<i>Uploading...</i>")
         self.viewer.status = "Uploading transforms to server..."
 
-        self._worker = _ScpWorker(upload_manual_transforms, (self.server_config, self.output_dir))
+        self._worker = ScpWorker(upload_manual_transforms, (self.server_config, self.output_dir))
         self._worker.finished.connect(self._on_upload_finished)
         self._worker.start()
 
@@ -1283,18 +1290,36 @@ class ManualAlignWidget(QWidget):
             self._redo()
 
     def _on_gamma_changed(self, value: float) -> None:
-        if self.fixed_layer is not None:
-            self.fixed_layer.gamma = value
-        if self.moving_layer is not None:
-            self.moving_layer.gamma = value
+        if self._overlay_mode == OVERLAY_COLOR:
+            if self.fixed_layer is not None:
+                self.fixed_layer.gamma = value
+            if self.moving_layer is not None:
+                self.moving_layer.gamma = value
+        elif self._composite_layer is not None:
+            self._composite_layer.gamma = value
 
     def _on_opacity_moving_changed(self, value: float) -> None:
-        if self.moving_layer is not None:
+        if self._overlay_mode == OVERLAY_COLOR and self.moving_layer is not None:
             self.moving_layer.opacity = value
 
     def _on_opacity_fixed_changed(self, value: float) -> None:
-        if self.fixed_layer is not None:
+        if self._overlay_mode == OVERLAY_COLOR and self.fixed_layer is not None:
             self.fixed_layer.opacity = value
+
+    def _on_overlay_mode_changed(self, _: int = 0) -> None:
+        self._overlay_mode = [OVERLAY_COLOR, OVERLAY_DIFF, OVERLAY_CHECKER][self.combo_overlay.currentIndex()]
+        is_checker = self._overlay_mode == OVERLAY_CHECKER
+        self._tile_row_label.setVisible(is_checker)
+        self.spin_tile.setVisible(is_checker)
+        self._rebuild_layer_visibility()
+        if self._overlay_mode != OVERLAY_COLOR:
+            state = self._current_state()
+            self._refresh_composite(state)
+
+    def _on_tile_size_changed(self, _: int = 0) -> None:
+        if self._overlay_mode == OVERLAY_CHECKER:
+            state = self._current_state()
+            self._refresh_composite(state)
 
     def _nudge_translate(self, dx: float, dy: float) -> None:
         state = self._current_state()
