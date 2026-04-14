@@ -1,8 +1,17 @@
-"""Napari widget for interactive manual slice alignment.
+"""Napari dock widget for interactive manual slice alignment.
 
-Displays consecutive common-space slices as red/green AIP overlays.
-The user adjusts translation and rotation of the moving slice until
-it aligns with the fixed slice (yellow = aligned).
+Provides two complementary alignment modes:
+
+XY Alignment
+    Displays consecutive slice AIP projections as a red/green overlay.
+    The user adjusts TX, TY, and rotation of the moving slice.
+    Three overlay modes (Color, Difference, Checkerboard) and four
+    enhancement modes (None, Edges, CLAHE, Sharpen) aid visibility.
+
+Z Alignment
+    Displays XZ and YZ center cross-sections of each slice to verify
+    the depth-overlap (Z-offset) between consecutive slices.
+    Fixed-Z and Moving-Z spinboxes control the overlap voxel indices.
 
 Saves corrected transforms as SimpleITK .tfm files compatible with
 the linumpy stacking pipeline.
@@ -39,11 +48,16 @@ from qtpy.QtWidgets import (
 )
 
 from linumpy_manual_align.image_utils import (
+    ENHANCE_CLAHE,
+    ENHANCE_EDGES,
+    ENHANCE_NONE,
+    ENHANCE_SHARPEN,
     OVERLAY_CHECKER,
     OVERLAY_COLOR,
     OVERLAY_DIFF,
     apply_transform,
     build_overlay,
+    enhance_aip,
     normalize_aip,
 )
 from linumpy_manual_align.omezarr_io import load_aip_from_ome_zarr
@@ -135,6 +149,10 @@ class ManualAlignWidget(QWidget):
         self.fixed_layer: napari.layers.Image | None = None
         self.moving_layer: napari.layers.Image | None = None
         self._composite_layer: napari.layers.Image | None = None
+        # Raw (normalized, pre-enhancement) AIPs kept so we can re-enhance without disk I/O
+        self._raw_fixed_aip: np.ndarray | None = None
+        self._raw_moving_aip: np.ndarray | None = None
+        # Enhanced AIPs — what is actually displayed and used for compositing
         self._original_fixed_aip: np.ndarray | None = None
         self._original_moving_aip: np.ndarray | None = None  # before rotation
         self._suppress_translate_event = False
@@ -147,8 +165,9 @@ class ManualAlignWidget(QWidget):
         self._projection_mode = "xy"  # "xy", "xz", "yz"
         self._current_offsets: dict[int, tuple[int, int]] = {}  # mid -> (fixed_z, moving_z)
 
-        # Overlay display mode
+        # Overlay display mode and AIP enhancement mode
         self._overlay_mode = OVERLAY_COLOR
+        self._enhance_mode = ENHANCE_NONE
 
         # Current pair index
         self.current_pair_idx = 0
@@ -374,6 +393,19 @@ class ManualAlignWidget(QWidget):
         self.combo_overlay.currentIndexChanged.connect(self._on_overlay_mode_changed)
         disp_form.addRow("Overlay:", self.combo_overlay)
 
+        self.combo_enhance = QComboBox()
+        self.combo_enhance.addItems(["None", "Edges (Sobel)", "CLAHE", "Sharpen"])
+        self.combo_enhance.setToolTip(
+            "None: display normalized AIP as-is\n"
+            "Edges: Sobel gradient magnitude - highlights tissue boundaries\n"
+            "  Best for oblique/angled cuts where edges are the key landmark\n"
+            "CLAHE: adaptive histogram equalization - equalises local contrast\n"
+            "  Best for sagittal cuts where projection blur hides boundaries\n"
+            "Sharpen: unsharp mask - mild crispening for blurry projections"
+        )
+        self.combo_enhance.currentIndexChanged.connect(self._on_enhance_changed)
+        disp_form.addRow("Enhance:", self.combo_enhance)
+
         self.spin_tile = QSpinBox()
         self.spin_tile.setRange(2, 512)
         self.spin_tile.setValue(16)
@@ -574,6 +606,14 @@ class ManualAlignWidget(QWidget):
         # Normalize to [0, 1] for display
         fixed_aip = self._normalize(fixed_aip)
         moving_aip = self._normalize(moving_aip)
+
+        # Store raw (normalized) AIPs so enhancement can be changed without reloading from disk
+        self._raw_fixed_aip = fixed_aip.copy()
+        self._raw_moving_aip = moving_aip.copy()
+
+        # Apply current enhancement to derive the display AIPs
+        fixed_aip = enhance_aip(fixed_aip, self._enhance_mode)
+        moving_aip = enhance_aip(moving_aip, self._enhance_mode)
 
         self._original_fixed_aip = fixed_aip.copy()
         self._original_moving_aip = moving_aip.copy()
@@ -1320,6 +1360,24 @@ class ManualAlignWidget(QWidget):
         if self._overlay_mode == OVERLAY_CHECKER:
             state = self._current_state()
             self._refresh_composite(state)
+
+    def _on_enhance_changed(self, _: int = 0) -> None:
+        """Re-enhance both AIPs from the stored raw data and refresh the display."""
+        modes = [ENHANCE_NONE, ENHANCE_EDGES, ENHANCE_CLAHE, ENHANCE_SHARPEN]
+        self._enhance_mode = modes[self.combo_enhance.currentIndex()]
+
+        if self._raw_fixed_aip is None or self._raw_moving_aip is None:
+            return
+
+        self._original_fixed_aip = enhance_aip(self._raw_fixed_aip, self._enhance_mode)
+        self._original_moving_aip = enhance_aip(self._raw_moving_aip, self._enhance_mode)
+
+        if self.fixed_layer is not None:
+            self.fixed_layer.data = self._original_fixed_aip
+        if self.moving_layer is not None:
+            # Re-apply rotation + translation on top of the new enhanced base
+            state = self._current_state()
+            self._apply_state(state, push=False)
 
     def _nudge_translate(self, dx: float, dy: float) -> None:
         state = self._current_state()

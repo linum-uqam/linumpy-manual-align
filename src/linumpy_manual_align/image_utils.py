@@ -7,6 +7,7 @@ unit-tested without a display.
 from __future__ import annotations
 
 import numpy as np
+from scipy.ndimage import gaussian_filter, sobel
 from scipy.ndimage import rotate as ndimage_rotate
 from scipy.ndimage import shift as ndimage_shift
 
@@ -14,6 +15,12 @@ from scipy.ndimage import shift as ndimage_shift
 OVERLAY_COLOR = "color"
 OVERLAY_DIFF = "diff"
 OVERLAY_CHECKER = "checker"
+
+# Enhancement mode identifiers
+ENHANCE_NONE = "none"
+ENHANCE_EDGES = "edges"
+ENHANCE_CLAHE = "clahe"
+ENHANCE_SHARPEN = "sharpen"
 
 
 def normalize_aip(img: np.ndarray) -> np.ndarray:
@@ -26,6 +33,62 @@ def normalize_aip(img: np.ndarray) -> np.ndarray:
     if p_high <= p_low:
         return np.zeros_like(img, dtype=np.float32)
     return np.clip((img - p_low) / (p_high - p_low), 0, 1).astype(np.float32)
+
+
+def enhance_aip(img: np.ndarray, mode: str) -> np.ndarray:
+    """Apply a visual enhancement to a normalized [0, 1] float32 AIP.
+
+    Each mode targets a different alignment difficulty:
+
+    ``ENHANCE_EDGES``
+        Sobel gradient magnitude.  Converts the image to a map of tissue
+        boundaries regardless of absolute intensity.  Ideal for oblique cuts
+        where tissue edges are the clearest alignment landmarks.
+
+    ``ENHANCE_CLAHE``
+        Contrast-Limited Adaptive Histogram Equalization (CLAHE).  Equalises
+        local contrast so that both bright core regions and dim periphery are
+        visible at the same time.  Helps with projection blur where the tissue
+        top and bottom occupy different intensities.
+
+    ``ENHANCE_SHARPEN``
+        Unsharp mask (Gaussian high-pass added back to the image).  A mild
+        crispening that sharpens blurry features without the binary look of
+        edge detection.  Good as a general-purpose enhancement.
+
+    Parameters
+    ----------
+    img : np.ndarray
+        Normalized [0, 1] float32 2-D array.
+    mode : str
+        One of the ``ENHANCE_*`` constants.
+
+    Returns
+    -------
+    np.ndarray
+        Enhanced image, normalized to [0, 1], same shape and dtype as *img*.
+    """
+    if mode == ENHANCE_NONE:
+        return img
+
+    if mode == ENHANCE_EDGES:
+        gx = sobel(img, axis=1)
+        gy = sobel(img, axis=0)
+        edges = np.hypot(gx, gy).astype(np.float32)
+        return normalize_aip(edges)
+
+    if mode == ENHANCE_CLAHE:
+        from skimage.exposure import equalize_adapthist
+
+        return equalize_adapthist(img, clip_limit=0.03).astype(np.float32)
+
+    if mode == ENHANCE_SHARPEN:
+        blurred = gaussian_filter(img, sigma=2.0)
+        # Unsharp mask: boost by 1.5x the high-frequency detail
+        sharpened = img + 1.5 * (img - blurred)
+        return np.clip(sharpened, 0, 1).astype(np.float32)
+
+    return img
 
 
 def apply_transform(
