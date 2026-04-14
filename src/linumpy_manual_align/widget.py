@@ -30,7 +30,10 @@ from qtpy.QtWidgets import (
     QMessageBox,
     QProgressBar,
     QPushButton,
+    QScrollArea,
     QSlider,
+    QSpinBox,
+    QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -146,6 +149,8 @@ class ManualAlignWidget(QWidget):
         level: int = 1,
         filter_slices: list[int] | None = None,
         aips_dir: Path | None = None,
+        aips_xz_dir: Path | None = None,
+        aips_yz_dir: Path | None = None,
         server_config: object = None,
     ):
         super().__init__()
@@ -155,6 +160,8 @@ class ManualAlignWidget(QWidget):
         self.output_dir = Path(output_dir)
         self.level = level
         self.aips_dir = Path(aips_dir) if aips_dir else None
+        self.aips_xz_dir = Path(aips_xz_dir) if aips_xz_dir else None
+        self.aips_yz_dir = Path(aips_yz_dir) if aips_yz_dir else None
         self.server_config = server_config
 
         # Discover slices — from AIP package or OME-Zarr directory
@@ -168,6 +175,10 @@ class ManualAlignWidget(QWidget):
             # Empty startup — will be populated after server download
             self.slice_paths = {}
             self._use_precomputed_aips = True
+
+        # Discover axis-specific AIPs (XZ, YZ projections)
+        self.slice_paths_xz = self._discover_aips(self.aips_xz_dir) if self.aips_xz_dir else {}
+        self.slice_paths_yz = self._discover_aips(self.aips_yz_dir) if self.aips_yz_dir else {}
 
         self.slice_ids = list(self.slice_paths.keys())
         self.existing_transforms = discover_transforms(self.transforms_dir) if self.transforms_dir else {}
@@ -194,8 +205,13 @@ class ManualAlignWidget(QWidget):
         self._original_moving_aip: np.ndarray | None = None  # before rotation
         self._suppress_translate_event = False
         self._suppress_spinbox_event = False
+        self._suppress_z_offset_event = False
         self._worker: _ScpWorker | None = None  # prevent GC of background thread
         self._close_confirmed = False
+
+        # Projection mode and Z-overlap state
+        self._projection_mode = "xy"  # "xy", "xz", "yz"
+        self._current_offsets: dict[int, tuple[int, int]] = {}  # mid -> (fixed_z, moving_z)
 
         # Current pair index
         self.current_pair_idx = 0
@@ -216,51 +232,104 @@ class ManualAlignWidget(QWidget):
 
     # ----- UI construction -----
 
-    def _build_ui(self) -> None:
-        layout = QVBoxLayout()
-        self.setLayout(layout)
+    @staticmethod
+    def _form(spacing: int = 4) -> QFormLayout:
+        """Return a consistently styled QFormLayout."""
+        f = QFormLayout()
+        f.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        f.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
+        f.setSpacing(spacing)
+        return f
 
-        # -- Pair selector --
-        nav_group = QGroupBox("Slice Pair")
-        nav_layout = QHBoxLayout()
-        nav_group.setLayout(nav_layout)
+    def _build_ui(self) -> None:
+        # Outer layout holds a scroll area so the panel never overflows
+        outer = QVBoxLayout()
+        outer.setContentsMargins(0, 0, 0, 0)
+        self.setLayout(outer)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.NoFrame)
+        outer.addWidget(scroll)
+
+        content = QWidget()
+        layout = QVBoxLayout()
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(6)
+        content.setLayout(layout)
+        scroll.setWidget(content)
+
+        # ── Pair navigation ───────────────────────────────────────────────────
+        nav_row = QHBoxLayout()
+        nav_row.setSpacing(4)
 
         self.btn_prev = QPushButton("◀ Prev (P)")
         self.btn_prev.clicked.connect(self._prev_pair)
-        nav_layout.addWidget(self.btn_prev)
+        nav_row.addWidget(self.btn_prev)
 
         self.pair_combo = QComboBox()
         for fid, mid in self.pairs:
             label = f"z{fid:02d} → z{mid:02d}"
             if mid in self.existing_transforms:
-                # Load metrics to show severity
                 metrics_path = self.existing_transforms[mid] / "pairwise_registration_metrics.json"
                 metrics = load_pairwise_metrics(metrics_path)
                 mag = self._get_metric(metrics, "translation_magnitude")
                 if mag is not None:
-                    label += f"  (mag={mag:.0f}px)"
+                    label += f"  ({mag:.0f}px)"
             self.pair_combo.addItem(label)
         self.pair_combo.currentIndexChanged.connect(self._on_pair_changed)
-        nav_layout.addWidget(self.pair_combo, stretch=1)
+        nav_row.addWidget(self.pair_combo, stretch=1)
 
         self.btn_next = QPushButton("Next (N) ▶")
         self.btn_next.clicked.connect(self._next_pair)
-        nav_layout.addWidget(self.btn_next)
+        nav_row.addWidget(self.btn_next)
 
-        layout.addWidget(nav_group)
+        layout.addLayout(nav_row)
 
-        # -- Transform controls --
-        ctrl_group = QGroupBox("Transform (working resolution)")
-        ctrl_layout = QFormLayout()
-        ctrl_group.setLayout(ctrl_layout)
+        # ── Mode toggle buttons ───────────────────────────────────────────────
+        mode_row = QHBoxLayout()
+        mode_row.setSpacing(0)
 
+        self._btn_mode_xy = QPushButton("XY Alignment")
+        self._btn_mode_xy.setCheckable(True)
+        self._btn_mode_xy.setChecked(True)
+        self._btn_mode_xy.setToolTip("Lateral alignment: adjust TX, TY, and Rotation")
+        self._btn_mode_xy.toggled.connect(lambda checked: self._on_mode_btn_toggled("xy", checked))
+        mode_row.addWidget(self._btn_mode_xy)
+
+        self._btn_mode_z = QPushButton("Z Alignment")
+        self._btn_mode_z.setCheckable(True)
+        self._btn_mode_z.setChecked(False)
+        self._btn_mode_z.setToolTip("Depth alignment: adjust Z-overlap offsets, view XZ/YZ cross-sections")
+        self._btn_mode_z.toggled.connect(lambda checked: self._on_mode_btn_toggled("z", checked))
+        mode_row.addWidget(self._btn_mode_z)
+
+        has_axis_aips = bool(self.slice_paths_xz or self.slice_paths_yz)
+        if not has_axis_aips:
+            self._btn_mode_z.setEnabled(False)
+            self._btn_mode_z.setToolTip("XZ/YZ projections not available — regenerate the data package to enable")
+
+        layout.addLayout(mode_row)
+
+        # ── Stacked content (sizes to active page only) ───────────────────────
+        self._mode_stack = QStackedWidget()
+        layout.addWidget(self._mode_stack)
+
+        # Page 0 - XY Alignment ───────────────────────────────────────────────
+        xy_page = QWidget()
+        xy_layout = QVBoxLayout()
+        xy_layout.setContentsMargins(0, 4, 0, 0)
+        xy_layout.setSpacing(4)
+        xy_page.setLayout(xy_layout)
+
+        xy_form = self._form()
         self.spin_tx = QDoubleSpinBox()
         self.spin_tx.setRange(-2000, 2000)
         self.spin_tx.setDecimals(1)
         self.spin_tx.setSingleStep(1.0)
         self.spin_tx.setSuffix(" px")
         self.spin_tx.valueChanged.connect(self._on_spinbox_changed)
-        ctrl_layout.addRow("TX:", self.spin_tx)
+        xy_form.addRow("TX:", self.spin_tx)
 
         self.spin_ty = QDoubleSpinBox()
         self.spin_ty.setRange(-2000, 2000)
@@ -268,7 +337,7 @@ class ManualAlignWidget(QWidget):
         self.spin_ty.setSingleStep(1.0)
         self.spin_ty.setSuffix(" px")
         self.spin_ty.valueChanged.connect(self._on_spinbox_changed)
-        ctrl_layout.addRow("TY:", self.spin_ty)
+        xy_form.addRow("TY:", self.spin_ty)
 
         self.spin_rot = QDoubleSpinBox()
         self.spin_rot.setRange(-180, 180)
@@ -276,30 +345,96 @@ class ManualAlignWidget(QWidget):
         self.spin_rot.setSingleStep(0.1)
         self.spin_rot.setSuffix("°")
         self.spin_rot.valueChanged.connect(self._on_rotation_changed)
-        ctrl_layout.addRow("Rotation:", self.spin_rot)
+        xy_form.addRow("Rotation:", self.spin_rot)
 
-        # Rotation slider for finer control
         self.rot_slider = QSlider(Qt.Horizontal)
-        self.rot_slider.setRange(-1800, 1800)  # -180.0 to 180.0 in 0.1° steps
+        self.rot_slider.setRange(-1800, 1800)
         self.rot_slider.setValue(0)
         self.rot_slider.valueChanged.connect(self._on_rotation_slider_changed)
-        ctrl_layout.addRow("", self.rot_slider)
+        xy_form.addRow("", self.rot_slider)
 
-        layout.addWidget(ctrl_group)
+        xy_layout.addLayout(xy_form)
 
-        # -- Display controls --
-        display_group = QGroupBox("Display")
-        display_layout = QFormLayout()
-        display_group.setLayout(display_layout)
+        xy_hint = QLabel(
+            "<i style='color: grey;'>Arrow: 1px · Shift: 10px · Ctrl: 50px · [/]: 0.1° · Shift[/]: 1° · Ctrl[/]: 5°</i>"
+        )
+        xy_hint.setWordWrap(True)
+        xy_layout.addWidget(xy_hint)
+
+        row1 = QHBoxLayout()
+        self.btn_load_auto = QPushButton("Load Automated")
+        self.btn_load_auto.clicked.connect(self._load_automated_transform)
+        row1.addWidget(self.btn_load_auto)
+        self.btn_reset = QPushButton("Reset")
+        self.btn_reset.clicked.connect(self._reset_transform)
+        row1.addWidget(self.btn_reset)
+        xy_layout.addLayout(row1)
+
+        row2 = QHBoxLayout()
+        self.btn_undo = QPushButton(_UNDO_LABEL)
+        self.btn_undo.clicked.connect(self._undo)
+        row2.addWidget(self.btn_undo)
+        self.btn_redo = QPushButton(_REDO_LABEL)
+        self.btn_redo.clicked.connect(self._redo)
+        row2.addWidget(self.btn_redo)
+        xy_layout.addLayout(row2)
+
+        self._mode_stack.addWidget(xy_page)
+
+        # Page 1 - Z Alignment ────────────────────────────────────────────────
+        z_page = QWidget()
+        z_layout = QVBoxLayout()
+        z_layout.setContentsMargins(0, 4, 0, 0)
+        z_layout.setSpacing(4)
+        z_page.setLayout(z_layout)
+
+        z_form = self._form()
+
+        self.proj_combo = QComboBox()
+        self.proj_combo.addItem("XZ — front cross-section")
+        self.proj_combo.addItem("YZ — side cross-section")
+        self.proj_combo.setToolTip("Switch between front (XZ) and side (YZ) cross-section views")
+        self.proj_combo.currentIndexChanged.connect(self._on_z_proj_changed)
+        z_form.addRow("View:", self.proj_combo)
+
+        self.spin_fixed_z = QSpinBox()
+        self.spin_fixed_z.setRange(0, 200)
+        self.spin_fixed_z.setSuffix(" voxels")
+        self.spin_fixed_z.setToolTip("Z-index in the fixed (bottom/green) slice where overlap begins")
+        self.spin_fixed_z.valueChanged.connect(self._on_z_offset_changed)
+        z_form.addRow("Fixed Z start:", self.spin_fixed_z)
+
+        self.spin_moving_z = QSpinBox()
+        self.spin_moving_z.setRange(0, 200)
+        self.spin_moving_z.setSuffix(" voxels")
+        self.spin_moving_z.setToolTip("Z-index in the moving (top/red) slice where overlap begins")
+        self.spin_moving_z.valueChanged.connect(self._on_z_offset_changed)
+        z_form.addRow("Moving Z start:", self.spin_moving_z)
+
+        self.z_relative_label = QLabel("Relative shift: 0 voxels")
+        z_form.addRow("", self.z_relative_label)
+
+        z_layout.addLayout(z_form)
+
+        z_hint = QLabel("<i style='color: grey;'>Align tissue boundaries visible in the cross-section overlay.</i>")
+        z_hint.setWordWrap(True)
+        z_layout.addWidget(z_hint)
+
+        self._mode_stack.addWidget(z_page)
+
+        # ── Display ───────────────────────────────────────────────────────────
+        disp_group = QGroupBox("Display")
+        disp_form = self._form()
+        disp_group.setLayout(disp_form)
 
         self.spin_gamma = QDoubleSpinBox()
         self.spin_gamma.setRange(0.1, 2.0)
         self.spin_gamma.setDecimals(2)
         self.spin_gamma.setSingleStep(0.05)
         self.spin_gamma.setValue(0.6)
-        self.spin_gamma.setToolTip("Gamma correction for both layers (< 1 boosts midtones)")
+        self.spin_gamma.setToolTip("Gamma correction (< 1 boosts midtones)")
         self.spin_gamma.valueChanged.connect(self._on_gamma_changed)
-        display_layout.addRow("Gamma:", self.spin_gamma)
+        disp_form.addRow("Gamma:", self.spin_gamma)
 
         self.spin_opacity_moving = QDoubleSpinBox()
         self.spin_opacity_moving.setRange(0.1, 1.0)
@@ -308,7 +443,7 @@ class ManualAlignWidget(QWidget):
         self.spin_opacity_moving.setValue(1.0)
         self.spin_opacity_moving.setToolTip("Opacity of the moving (red) layer")
         self.spin_opacity_moving.valueChanged.connect(self._on_opacity_moving_changed)
-        display_layout.addRow("Moving opacity:", self.spin_opacity_moving)
+        disp_form.addRow("Moving opacity:", self.spin_opacity_moving)
 
         self.spin_opacity_fixed = QDoubleSpinBox()
         self.spin_opacity_fixed.setRange(0.1, 1.0)
@@ -317,90 +452,58 @@ class ManualAlignWidget(QWidget):
         self.spin_opacity_fixed.setValue(1.0)
         self.spin_opacity_fixed.setToolTip("Opacity of the fixed (green) layer")
         self.spin_opacity_fixed.valueChanged.connect(self._on_opacity_fixed_changed)
-        display_layout.addRow("Fixed opacity:", self.spin_opacity_fixed)
+        disp_form.addRow("Fixed opacity:", self.spin_opacity_fixed)
 
-        layout.addWidget(display_group)
+        layout.addWidget(disp_group)
 
-        # -- Action buttons --
-        action_group = QGroupBox("Actions")
-        action_layout = QHBoxLayout()
-        action_group.setLayout(action_layout)
-
-        self.btn_load_auto = QPushButton("Load Automated")
-        self.btn_load_auto.clicked.connect(self._load_automated_transform)
-        action_layout.addWidget(self.btn_load_auto)
-
-        self.btn_reset = QPushButton("Reset")
-        self.btn_reset.clicked.connect(self._reset_transform)
-        action_layout.addWidget(self.btn_reset)
-
-        self.btn_undo = QPushButton(_UNDO_LABEL)
-        self.btn_undo.clicked.connect(self._undo)
-        action_layout.addWidget(self.btn_undo)
-
-        self.btn_redo = QPushButton(_REDO_LABEL)
-        self.btn_redo.clicked.connect(self._redo)
-        action_layout.addWidget(self.btn_redo)
-
-        layout.addWidget(action_group)
-
-        # -- Save buttons --
-        save_group = QGroupBox("Save")
-        save_layout = QHBoxLayout()
-        save_group.setLayout(save_layout)
-
+        # ── Save ──────────────────────────────────────────────────────────────
+        save_row = QHBoxLayout()
         self.btn_save = QPushButton("Save Current (S)")
         self.btn_save.clicked.connect(self._save_current)
-        save_layout.addWidget(self.btn_save)
-
-        self.btn_save_all = QPushButton("Save All Modified && Exit")
+        save_row.addWidget(self.btn_save)
+        self.btn_save_all = QPushButton("Save All && Exit")
         self.btn_save_all.clicked.connect(self._save_all_and_exit)
-        save_layout.addWidget(self.btn_save_all)
+        save_row.addWidget(self.btn_save_all)
+        layout.addLayout(save_row)
 
-        layout.addWidget(save_group)
-
-        # -- Server transfer buttons --
+        # ── Server ────────────────────────────────────────────────────────────
         server_group = QGroupBox("Server")
         server_layout = QVBoxLayout()
+        server_layout.setSpacing(4)
         server_group.setLayout(server_layout)
 
-        # Config file selector
-        config_layout = QHBoxLayout()
-        config_layout.addWidget(QLabel("Config:"))
+        cfg_row = QHBoxLayout()
+        cfg_row.addWidget(QLabel("Config:"))
         self.config_path_edit = QLineEdit()
-        self.config_path_edit.setPlaceholderText("nextflow.config path...")
+        self.config_path_edit.setPlaceholderText("nextflow.config path…")
         self.config_path_edit.setReadOnly(True)
-        config_layout.addWidget(self.config_path_edit, stretch=1)
-        self.btn_browse_config = QPushButton("Browse...")
+        cfg_row.addWidget(self.config_path_edit, stretch=1)
+        self.btn_browse_config = QPushButton("Browse…")
         self.btn_browse_config.clicked.connect(self._browse_server_config)
-        config_layout.addWidget(self.btn_browse_config)
-        server_layout.addLayout(config_layout)
+        cfg_row.addWidget(self.btn_browse_config)
+        server_layout.addLayout(cfg_row)
 
-        # Host field
-        host_layout = QHBoxLayout()
-        host_layout.addWidget(QLabel("Host:"))
+        host_row = QHBoxLayout()
+        host_row.addWidget(QLabel("Host:"))
         self.host_edit = QLineEdit("132.207.157.41")
         self.host_edit.setPlaceholderText("server hostname or IP")
         self.host_edit.textChanged.connect(self._on_host_changed)
-        host_layout.addWidget(self.host_edit, stretch=1)
-        server_layout.addLayout(host_layout)
+        host_row.addWidget(self.host_edit, stretch=1)
+        server_layout.addLayout(host_row)
 
-        server_btn_layout = QHBoxLayout()
+        srv_btn_row = QHBoxLayout()
         self.btn_download = QPushButton("⬇ Download Data")
-        self.btn_download.setToolTip("Download AIPs and transforms from the server.\nRequires a configured server.")
+        self.btn_download.setToolTip("Download AIPs and transforms from the server.")
         self.btn_download.clicked.connect(self._download_from_server)
-        server_btn_layout.addWidget(self.btn_download)
-
+        srv_btn_row.addWidget(self.btn_download)
         self.btn_upload = QPushButton("⬆ Upload Transforms")
-        self.btn_upload.setToolTip(
-            "Upload saved manual transforms to the server.\nThey will be placed in output/manual_transforms/."
-        )
+        self.btn_upload.setToolTip("Upload saved manual transforms to the server.")
         self.btn_upload.clicked.connect(self._upload_to_server)
-        server_btn_layout.addWidget(self.btn_upload)
-        server_layout.addLayout(server_btn_layout)
+        srv_btn_row.addWidget(self.btn_upload)
+        server_layout.addLayout(srv_btn_row)
 
         self.server_progress = QProgressBar()
-        self.server_progress.setRange(0, 0)  # indeterminate pulse
+        self.server_progress.setRange(0, 0)
         self.server_progress.setTextVisible(False)
         self.server_progress.setFixedHeight(6)
         self.server_progress.hide()
@@ -410,7 +513,6 @@ class ManualAlignWidget(QWidget):
         self.server_status_label.setWordWrap(True)
         server_layout.addWidget(self.server_status_label)
 
-        # Initialize server UI state
         if self.server_config is not None:
             if hasattr(self.server_config, "config_path") and self.server_config.config_path:
                 self.config_path_edit.setText(str(self.server_config.config_path))
@@ -422,12 +524,10 @@ class ManualAlignWidget(QWidget):
 
         layout.addWidget(server_group)
 
-        # -- Status display --
+        # ── Status ────────────────────────────────────────────────────────────
         self.status_label = QLabel("")
         self.status_label.setWordWrap(True)
         layout.addWidget(self.status_label)
-
-        layout.addStretch()
 
     # ----- AIP discovery -----
 
@@ -443,6 +543,24 @@ class ManualAlignWidget(QWidget):
             if m and p.name.endswith(".npz"):
                 aips[int(m.group(1))] = p
         return dict(sorted(aips.items()))
+
+    def _discover_axis_aip_dirs(self, pkg_root: Path) -> None:
+        """Discover aips_xz/ and aips_yz/ directories in the package root."""
+        for name, attr in [("aips_xz", "aips_xz_dir"), ("aips_yz", "aips_yz_dir")]:
+            candidate = pkg_root / name
+            if candidate.exists():
+                setattr(self, attr, candidate)
+                paths = self._discover_aips(candidate)
+                if name == "aips_xz":
+                    self.slice_paths_xz = paths
+                else:
+                    self.slice_paths_yz = paths
+
+        # Enable the Z Alignment button if axis AIPs are now available
+        has_axis_aips = bool(self.slice_paths_xz or self.slice_paths_yz)
+        self._btn_mode_z.setEnabled(has_axis_aips)
+        if has_axis_aips:
+            self._btn_mode_z.setToolTip("Depth alignment: adjust Z-overlap offsets, view XZ/YZ cross-sections")
 
     # ----- Pair loading -----
 
@@ -476,9 +594,21 @@ class ManualAlignWidget(QWidget):
 
         self.viewer.status = f"Loading z{fid:02d} / z{mid:02d}..."
 
+        # Select AIP paths based on projection mode
+        if self._projection_mode == "xz" and self.slice_paths_xz:
+            aip_paths = self.slice_paths_xz
+        elif self._projection_mode == "yz" and self.slice_paths_yz:
+            aip_paths = self.slice_paths_yz
+        else:
+            aip_paths = self.slice_paths
+
+        if fid not in aip_paths or mid not in aip_paths:
+            logger.warning(f"No {self._projection_mode.upper()} AIPs for pair z{fid:02d}→z{mid:02d}")
+            aip_paths = self.slice_paths  # fall back to XY
+
         if self._use_precomputed_aips:
-            fixed_aip, fixed_scale_yx = self._load_aip_from_npz(self.slice_paths[fid])
-            moving_aip, moving_scale_yx = self._load_aip_from_npz(self.slice_paths[mid])
+            fixed_aip, fixed_scale_yx = self._load_aip_from_npz(aip_paths[fid])
+            moving_aip, moving_scale_yx = self._load_aip_from_npz(aip_paths[mid])
         else:
             fixed_aip, fixed_scale_yx = self._load_aip_from_zarr(self.slice_paths[fid])
             moving_aip, moving_scale_yx = self._load_aip_from_zarr(self.slice_paths[mid])
@@ -489,8 +619,9 @@ class ManualAlignWidget(QWidget):
 
         self._original_moving_aip = moving_aip.copy()
 
-        # Store image center for this pair
-        self.pair_centers[mid] = (moving_aip.shape[1] / 2.0, moving_aip.shape[0] / 2.0)  # (cx, cy)
+        # Store image center for this pair (only from XY view, needed for rotation)
+        if self._projection_mode == "xy":
+            self.pair_centers[mid] = (moving_aip.shape[1] / 2.0, moving_aip.shape[0] / 2.0)  # (cx, cy)
 
         # Remove existing layers
         while len(self.viewer.layers) > 0:
@@ -502,10 +633,12 @@ class ManualAlignWidget(QWidget):
         opacity_fixed = self.spin_opacity_fixed.value()
         opacity_moving = self.spin_opacity_moving.value()
 
+        view_suffix = {"xy": "", "xz": " (XZ)", "yz": " (YZ)"}.get(self._projection_mode, "")
+
         # Add layers: fixed (green) then moving (red) on top
         self.fixed_layer = self.viewer.add_image(
             fixed_aip,
-            name=f"Fixed z{fid:02d}",
+            name=f"Fixed z{fid:02d}{view_suffix}",
             colormap="green",
             blending="additive",
             contrast_limits=clim,
@@ -515,7 +648,7 @@ class ManualAlignWidget(QWidget):
         )
         self.moving_layer = self.viewer.add_image(
             moving_aip,
-            name=f"Moving z{mid:02d}",
+            name=f"Moving z{mid:02d}{view_suffix}",
             colormap="red",
             blending="additive",
             contrast_limits=clim,
@@ -524,14 +657,27 @@ class ManualAlignWidget(QWidget):
             scale=moving_scale_yx,
         )
 
-        # Connect layer translate events for bidirectional sync
+        # Connect layer translate events for bidirectional sync (XY mode only)
         self.moving_layer.events.translate.connect(self._on_layer_translated)
 
         # Initialize or restore undo stack
         if mid not in self.undo_stacks:
-            # Auto-load automated transform as initial state if available
             initial = self._get_automated_state(mid)
             self.undo_stacks[mid] = UndoStack(initial)
+
+        # Load Z-offsets for this pair
+        if mid not in self._current_offsets:
+            offsets = (0, 0)
+            if mid in self.existing_transforms:
+                offsets = load_offsets(self.existing_transforms[mid] / "offsets.txt")
+            self._current_offsets[mid] = offsets
+
+        # Update Z-offset spinboxes
+        self._suppress_z_offset_event = True
+        self.spin_fixed_z.setValue(self._current_offsets[mid][0])
+        self.spin_moving_z.setValue(self._current_offsets[mid][1])
+        self._suppress_z_offset_event = False
+        self._update_z_relative_label()
 
         state = self.undo_stacks[mid].current
         self._apply_state(state, push=False)
@@ -543,7 +689,7 @@ class ManualAlignWidget(QWidget):
         self._update_status()
 
         self.viewer.reset_view()
-        self.viewer.status = f"Pair z{fid:02d} → z{mid:02d} loaded"
+        self.viewer.status = f"Pair z{fid:02d} → z{mid:02d} loaded ({self._projection_mode.upper()} view)"
 
     def _load_aip_from_npz(self, npz_path: Path) -> tuple[np.ndarray, list[float]]:
         """Load pre-computed AIP from an .npz file."""
@@ -578,21 +724,37 @@ class ManualAlignWidget(QWidget):
             self.undo_stacks[mid].push(state)
             self.unsaved_changes.add(mid)
 
-        # Apply rotation to image data
-        if abs(state.rotation) > 0.01:
-            rotated = ndimage_rotate(
-                self._original_moving_aip, -state.rotation, reshape=False, order=1, mode="constant", cval=0
-            )
+        if self._projection_mode == "xy":
+            # Apply rotation to image data
+            if abs(state.rotation) > 0.01:
+                rotated = ndimage_rotate(
+                    self._original_moving_aip, -state.rotation, reshape=False, order=1, mode="constant", cval=0
+                )
+            else:
+                rotated = self._original_moving_aip.copy()
+
+            self.moving_layer.data = rotated
+
+            # Apply translation via layer translate
+            scale = self.moving_layer.scale
+            self._suppress_translate_event = True
+            self.moving_layer.translate = [state.ty * scale[0], state.tx * scale[1]]
+            self._suppress_translate_event = False
         else:
-            rotated = self._original_moving_aip.copy()
+            # XZ/YZ mode: no rotation, show Z-offset as vertical shift
+            self.moving_layer.data = self._original_moving_aip.copy()
 
-        self.moving_layer.data = rotated
+            offsets = self._current_offsets.get(mid, (0, 0))
+            scale_factor = 2**self.level
+            dz_display = (offsets[0] - offsets[1]) / scale_factor
 
-        # Apply translation via layer translate
-        scale = self.moving_layer.scale
-        self._suppress_translate_event = True
-        self.moving_layer.translate = [state.ty * scale[0], state.tx * scale[1]]
-        self._suppress_translate_event = False
+            scale = self.moving_layer.scale
+            self._suppress_translate_event = True
+            if self._projection_mode == "xz":
+                self.moving_layer.translate = [dz_display * scale[0], state.tx * scale[1]]
+            else:  # yz
+                self.moving_layer.translate = [dz_display * scale[0], state.ty * scale[1]]
+            self._suppress_translate_event = False
 
         # Sync spinboxes
         self._suppress_spinbox_event = True
@@ -647,6 +809,13 @@ class ManualAlignWidget(QWidget):
         """Sync spinboxes when the user drags the moving layer."""
         if self._suppress_translate_event or self.moving_layer is None:
             return
+
+        # In XZ/YZ mode, ignore drag events (the vertical axis is controlled by Z-offsets)
+        if self._projection_mode != "xy":
+            state = self._current_state()
+            self._apply_state(state, push=False)
+            return
+
         translate = self.moving_layer.translate
         scale = self.moving_layer.scale
         ty = translate[0] / scale[0]
@@ -661,6 +830,53 @@ class ManualAlignWidget(QWidget):
         state = AlignmentState(tx=tx, ty=ty, rotation=self.spin_rot.value())
         self.undo_stacks[mid].push(state)
         self._update_status()
+
+    # ----- Projection and Z-offset handlers -----
+
+    def _on_mode_btn_toggled(self, mode: str, checked: bool) -> None:
+        """Handle XY / Z mode toggle buttons (mutually exclusive)."""
+        if not checked:
+            return
+        if mode == "xy":
+            self._btn_mode_z.setChecked(False)
+            self._projection_mode = "xy"
+            self._mode_stack.setCurrentIndex(0)
+        else:
+            self._btn_mode_xy.setChecked(False)
+            z_proj_idx = self.proj_combo.currentIndex()
+            self._projection_mode = "xz" if z_proj_idx == 0 else "yz"
+            self._mode_stack.setCurrentIndex(1)
+        if self.pairs:
+            self._load_pair(self.current_pair_idx)
+
+    def _on_z_proj_changed(self, idx: int) -> None:
+        """Switch between XZ and YZ within the Z Alignment page."""
+        if self._projection_mode == "xy":
+            return  # ignore if XY mode is active
+        self._projection_mode = "xz" if idx == 0 else "yz"
+        if self.pairs:
+            self._load_pair(self.current_pair_idx)
+
+    def _on_z_offset_changed(self) -> None:
+        """Handle Z-offset spinbox changes."""
+        if self._suppress_z_offset_event or not self.pairs:
+            return
+        mid = self.pairs[self.current_pair_idx][1]
+        self._current_offsets[mid] = (self.spin_fixed_z.value(), self.spin_moving_z.value())
+        self.unsaved_changes.add(mid)
+        self._update_z_relative_label()
+
+        # Re-apply current state to update display (Z-offset affects XZ/YZ views)
+        state = self._current_state()
+        self._apply_state(state, push=False)
+        self._update_status()
+
+    def _update_z_relative_label(self) -> None:
+        """Update the relative Z-shift label."""
+        fixed_z = self.spin_fixed_z.value()
+        moving_z = self.spin_moving_z.value()
+        diff = fixed_z - moving_z
+        self.z_relative_label.setText(f"Relative shift: {diff:+d} voxels")
 
     # ----- Navigation -----
 
@@ -746,11 +962,7 @@ class ManualAlignWidget(QWidget):
         state = self._current_state()
 
         cx, cy = self.pair_centers.get(mid, (0.0, 0.0))
-
-        # Carry over automated offsets if available
-        offsets = (0, 0)
-        if mid in self.existing_transforms:
-            offsets = load_offsets(self.existing_transforms[mid] / "offsets.txt")
+        offsets = self._current_offsets.get(mid, (0, 0))
 
         out_dir = self.output_dir / f"slice_z{mid:02d}"
         save_transform(out_dir, state.tx, state.ty, state.rotation, center=(cx, cy), level=self.level, offsets=offsets)
@@ -771,11 +983,7 @@ class ManualAlignWidget(QWidget):
             state = stack.current
 
             cx, cy = self.pair_centers.get(mid, (0.0, 0.0))
-
-            # Carry over automated offsets if available
-            offsets = (0, 0)
-            if mid in self.existing_transforms:
-                offsets = load_offsets(self.existing_transforms[mid] / "offsets.txt")
+            offsets = self._current_offsets.get(mid, (0, 0))
 
             out_dir = self.output_dir / f"slice_z{mid:02d}"
             save_transform(out_dir, state.tx, state.ty, state.rotation, center=(cx, cy), level=self.level, offsets=offsets)
@@ -828,6 +1036,10 @@ class ManualAlignWidget(QWidget):
                 self.slice_paths = self._discover_aips(pkg_aips)
                 self._use_precomputed_aips = True
                 self.slice_ids = list(self.slice_paths.keys())
+
+                # Discover axis-specific AIPs
+                self._discover_axis_aip_dirs(pkg_aips.parent)
+
                 # Reload transforms too if available
                 pkg_tfm = local_dir / "manual_align_package" / "transforms"
                 if not pkg_tfm.exists():
@@ -908,9 +1120,15 @@ class ManualAlignWidget(QWidget):
         state = self._current_state()
         scale = 2**self.level
 
-        lines = [f"<b>Pair {self.current_pair_idx + 1}/{len(self.pairs)}: z{fid:02d} → z{mid:02d}</b>"]
+        mode_label = {"xy": "XY", "xz": "XZ", "yz": "YZ"}.get(self._projection_mode, "XY")
+        lines = [f"<b>Pair {self.current_pair_idx + 1}/{len(self.pairs)}: z{fid:02d} → z{mid:02d}  [{mode_label}]</b>"]
         lines.append(f"Working res (level {self.level}): tx={state.tx:.1f}  ty={state.ty:.1f}  rot={state.rotation:.2f}°")
         lines.append(f"Full res (level 0): tx={state.tx * scale:.1f}  ty={state.ty * scale:.1f}  rot={state.rotation:.2f}°")
+
+        offsets = self._current_offsets.get(mid, (0, 0))
+        if offsets != (0, 0):
+            lines.append(f"Z offsets: fixed={offsets[0]}  moving={offsets[1]}  (Δ={offsets[0] - offsets[1]:+d})")
+
         hint = (
             "<i style='color: grey;'>"
             "Arrow: 1px · Shift+Arrow: 10px · Ctrl+Arrow: 50px"
@@ -1196,6 +1414,9 @@ class ManualAlignWidget(QWidget):
         self.slice_paths = self._discover_aips(aips_dir)
         self._use_precomputed_aips = True
         self.slice_ids = list(self.slice_paths.keys())
+
+        # Discover axis-specific AIPs
+        self._discover_axis_aip_dirs(aips_dir.parent)
 
         # Load transforms alongside the aips if present
         for tfm_candidate in (aips_dir.parent / "transforms", aips_dir.parent.parent / "transforms"):

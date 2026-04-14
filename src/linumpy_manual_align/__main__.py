@@ -90,11 +90,18 @@ def main(argv: list[str] | None = None) -> None:
 
     # Resolve data package paths
     aips_dir = None
+    aips_xz_dir = None
+    aips_yz_dir = None
     if args.data_package is not None:
         pkg = Path(args.data_package)
         aips_dir = pkg / "aips"
         if not aips_dir.exists():
             raise FileNotFoundError(f"AIPs directory not found in data package: {aips_dir}")
+        # Discover axis-specific AIP directories
+        if (pkg / "aips_xz").exists():
+            aips_xz_dir = pkg / "aips_xz"
+        if (pkg / "aips_yz").exists():
+            aips_yz_dir = pkg / "aips_yz"
         # Use package transforms unless explicitly overridden
         if args.transforms_dir is None:
             pkg_tfm = pkg / "transforms"
@@ -131,6 +138,10 @@ def main(argv: list[str] | None = None) -> None:
             aips_dir = pkg / "aips"
             if not aips_dir.exists():
                 raise FileNotFoundError(f"AIPs directory not found in data package: {aips_dir}")
+            if (pkg / "aips_xz").exists():
+                aips_xz_dir = pkg / "aips_xz"
+            if (pkg / "aips_yz").exists():
+                aips_yz_dir = pkg / "aips_yz"
             if args.transforms_dir is None:
                 pkg_tfm = pkg / "transforms"
                 if pkg_tfm.exists():
@@ -167,6 +178,8 @@ def main(argv: list[str] | None = None) -> None:
         level=args.level,
         filter_slices=args.slices,
         aips_dir=aips_dir,
+        aips_xz_dir=aips_xz_dir,
+        aips_yz_dir=aips_yz_dir,
         server_config=server_config,
     )
     viewer.window.add_dock_widget(widget, name="Manual Align", area="right")
