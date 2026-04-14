@@ -7,8 +7,7 @@ unit-tested without a display.
 from __future__ import annotations
 
 import numpy as np
-from scipy.ndimage import gaussian_filter, sobel
-from scipy.ndimage import rotate as ndimage_rotate
+from scipy.ndimage import affine_transform, gaussian_filter, sobel
 from scipy.ndimage import shift as ndimage_shift
 
 # Overlay mode identifiers (kept here so widget and tests share the same constants)
@@ -91,6 +90,64 @@ def enhance_aip(img: np.ndarray, mode: str) -> np.ndarray:
     return img
 
 
+def build_moving_affine(
+    rotation_deg: float,
+    tx: float,
+    ty: float,
+    scale_yx: tuple[float, float] | list[float],
+    shape_hw: tuple[int, int],
+) -> np.ndarray:
+    """Build the complete 3x3 data→world affine for the moving napari layer.
+
+    Encodes: scale → rotate CCW by *rotation_deg* about the image centre →
+    translate by *(ty, tx)* pixels.  Setting this matrix on ``layer.affine``
+    means no pixel resampling is ever required; napari renders the transform
+    natively in hardware.
+
+    Parameters
+    ----------
+    rotation_deg:
+        Counter-clockwise rotation in degrees.
+    tx, ty:
+        Translation in pixels at the current pyramid level
+        (positive tx = rightward, positive ty = downward).
+    scale_yx:
+        Physical pixel spacing ``(scale_y, scale_x)`` at the working level.
+    shape_hw:
+        Image shape ``(H, W)`` at the working level.
+
+    Returns
+    -------
+    np.ndarray
+        3x3 homogeneous affine matrix (data coords → world coords).
+    """
+    sy, sx = float(scale_yx[0]), float(scale_yx[1])
+    H, W = shape_hw
+
+    # Rotation centre = image centre in world space (at zero translation)
+    cy_w = H / 2.0 * sy
+    cx_w = W / 2.0 * sx
+
+    theta = np.radians(rotation_deg)
+    cos_t = np.cos(theta)
+    sin_t = np.sin(theta)
+
+    # World-space translation
+    ty_w = ty * sy
+    tx_w = tx * sx
+
+    # Full data→world transform:
+    #   world_row = cos*r*sy  - sin*c*sx  + (1-cos)*cy_w + sin*cx_w + ty_w
+    #   world_col = sin*r*sy  + cos*c*sx  - sin*cy_w + (1-cos)*cx_w + tx_w
+    return np.array(
+        [
+            [cos_t * sy, -sin_t * sx, (1.0 - cos_t) * cy_w + sin_t * cx_w + ty_w],
+            [sin_t * sy, cos_t * sx, -sin_t * cy_w + (1.0 - cos_t) * cx_w + tx_w],
+            [0.0, 0.0, 1.0],
+        ]
+    )
+
+
 def apply_transform(
     moving: np.ndarray,
     *,
@@ -98,7 +155,15 @@ def apply_transform(
     tx: float = 0.0,
     ty: float = 0.0,
 ) -> np.ndarray:
-    """Return *moving* with rotation and sub-pixel translation baked in.
+    """Return *moving* with rotation and translation baked into pixel data.
+
+    Used exclusively for the composite overlay modes (Difference, Checkerboard)
+    where a single combined image must be computed.  For the direct-layer
+    display path, use ``build_moving_affine`` instead — no pixel resampling.
+
+    Rotation is performed about pixel ``(H/2 - ty, W/2 - tx)`` so the
+    world-space pivot stays at the image centre after the ``(ty, tx)``
+    translation is applied.
 
     Parameters
     ----------
@@ -106,19 +171,24 @@ def apply_transform(
         Source image, shape (H, W).
     rotation:
         Counter-clockwise rotation in degrees.
-    tx:
-        Horizontal pixel shift (positive = right).
-    ty:
-        Vertical pixel shift (positive = down).
+    tx, ty:
+        Pixel shift at the current pyramid level.
 
     Returns
     -------
     np.ndarray
         Transformed image, same shape as *moving*.
     """
-    out = moving
+    out: np.ndarray = moving
     if abs(rotation) > 0.01:
-        out = ndimage_rotate(out, -rotation, reshape=False, order=1, mode="constant", cval=0)
+        angle_rad = np.radians(-rotation)
+        cos_a, sin_a = np.cos(angle_rad), np.sin(angle_rad)
+        # affine_transform maps output→input; use R(-rotation) for CCW display rotation.
+        m = np.array([[cos_a, sin_a], [-sin_a, cos_a]])
+        cy = moving.shape[0] / 2.0 - ty
+        cx = moving.shape[1] / 2.0 - tx
+        c = np.array([cy, cx])
+        out = affine_transform(out, m, offset=c - m @ c, mode="constant", cval=0, order=1).astype(np.float32)
     if abs(tx) > 1e-6 or abs(ty) > 1e-6:
         out = ndimage_shift(out, [ty, tx], order=1, mode="constant", cval=0)
     return out.astype(np.float32)

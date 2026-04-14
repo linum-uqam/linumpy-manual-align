@@ -7,7 +7,7 @@ those snapshots to support undo/redo.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 _MAX_UNDO_HISTORY = 500
 
@@ -21,12 +21,8 @@ class AlignmentState:
     rotation: float = 0.0
 
 
-@dataclass
 class UndoStack:
     """Simple linear undo/redo stack per slice pair."""
-
-    _history: list[AlignmentState] = field(default_factory=lambda: [AlignmentState()])
-    _index: int = 0
 
     def __init__(self, initial: AlignmentState | None = None):
         self._history = [initial if initial is not None else AlignmentState()]

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from linumpy_manual_align.__main__ import parse_args
-from linumpy_manual_align.widget import _MAX_UNDO_HISTORY, AlignmentState, UndoStack
+from linumpy_manual_align.state import _MAX_UNDO_HISTORY, AlignmentState, UndoStack
 
 
 class TestAlignmentState:

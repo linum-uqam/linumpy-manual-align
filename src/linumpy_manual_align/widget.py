@@ -56,6 +56,7 @@ from linumpy_manual_align.image_utils import (
     OVERLAY_COLOR,
     OVERLAY_DIFF,
     apply_transform,
+    build_moving_affine,
     build_overlay,
     enhance_aip,
     normalize_aip,
@@ -64,6 +65,7 @@ from linumpy_manual_align.omezarr_io import load_aip_from_ome_zarr
 from linumpy_manual_align.server_transfer import ScpWorker
 from linumpy_manual_align.state import AlignmentState, UndoStack
 from linumpy_manual_align.transform_io import (
+    adjust_for_rotation_center,
     discover_slices,
     discover_transforms,
     load_offsets,
@@ -81,6 +83,37 @@ _REDO_LABEL = "Redo (⌘⇧Z)" if _IS_MACOS else "Redo (Ctrl+Shift+Z)"
 # ---------------------------------------------------------------------------
 # Widget
 # ---------------------------------------------------------------------------
+
+
+# (key, method_name, args) — used by _install_keybindings
+_KEYBINDINGS: list[tuple[str, str, tuple]] = [
+    # Navigation
+    ("n", "_next_pair", ()),
+    ("p", "_prev_pair", ()),
+    ("s", "_save_current", ()),
+    # Fine translation (1 px)
+    ("Right", "_nudge_translate", (1, 0)),
+    ("Left", "_nudge_translate", (-1, 0)),
+    ("Up", "_nudge_translate", (0, -1)),
+    ("Down", "_nudge_translate", (0, 1)),
+    # Coarse translation (10 px)
+    ("Shift-Right", "_nudge_translate", (10, 0)),
+    ("Shift-Left", "_nudge_translate", (-10, 0)),
+    ("Shift-Up", "_nudge_translate", (0, -10)),
+    ("Shift-Down", "_nudge_translate", (0, 10)),
+    # Large translation (50 px)
+    ("Control-Right", "_nudge_translate", (50, 0)),
+    ("Control-Left", "_nudge_translate", (-50, 0)),
+    ("Control-Up", "_nudge_translate", (0, -50)),
+    ("Control-Down", "_nudge_translate", (0, 50)),
+    # Rotation
+    ("]", "_nudge_rotate", (0.1,)),
+    ("[", "_nudge_rotate", (-0.1,)),
+    ("Shift-]", "_nudge_rotate", (1.0,)),
+    ("Shift-[", "_nudge_rotate", (-1.0,)),
+    ("Control-]", "_nudge_rotate", (5.0,)),
+    ("Control-[", "_nudge_rotate", (-5.0,)),
+]
 
 
 class ManualAlignWidget(QWidget):
@@ -113,14 +146,11 @@ class ManualAlignWidget(QWidget):
         # Discover slices — from AIP package or OME-Zarr directory
         if self.aips_dir is not None:
             self.slice_paths = self._discover_aips(self.aips_dir)
-            self._use_precomputed_aips = True
         elif self.input_dir is not None:
             self.slice_paths = discover_slices(self.input_dir)
-            self._use_precomputed_aips = False
         else:
             # Empty startup — will be populated after server download
             self.slice_paths = {}
-            self._use_precomputed_aips = True
 
         # Discover axis-specific AIPs (XZ, YZ projections)
         self.slice_paths_xz = self._discover_aips(self.aips_xz_dir) if self.aips_xz_dir else {}
@@ -128,13 +158,10 @@ class ManualAlignWidget(QWidget):
 
         self.slice_ids = list(self.slice_paths.keys())
         self.existing_transforms = discover_transforms(self.transforms_dir) if self.transforms_dir else {}
+        self._filter_slices = filter_slices
 
-        # Build slice pair list: [(fixed_id, moving_id), ...]
-        self.pairs = []
-        for i in range(len(self.slice_ids) - 1):
-            fid, mid = self.slice_ids[i], self.slice_ids[i + 1]
-            if filter_slices is None or mid in filter_slices:
-                self.pairs.append((fid, mid))
+        self.pairs: list[tuple[int, int]] = []
+        self._build_pairs()
 
         if not self.pairs:
             logger.info("Starting in empty state — no slice pairs found. Download data from server.")
@@ -153,9 +180,8 @@ class ManualAlignWidget(QWidget):
         self._raw_fixed_aip: np.ndarray | None = None
         self._raw_moving_aip: np.ndarray | None = None
         # Enhanced AIPs — what is actually displayed and used for compositing
-        self._original_fixed_aip: np.ndarray | None = None
+        self._moving_scale_yx: list[float] = [1.0, 1.0]
         self._original_moving_aip: np.ndarray | None = None  # before rotation
-        self._suppress_translate_event = False
         self._suppress_spinbox_event = False
         self._suppress_z_offset_event = False
         self._worker: ScpWorker | None = None  # prevent GC of background thread
@@ -197,6 +223,30 @@ class ManualAlignWidget(QWidget):
         f.setSpacing(spacing)
         return f
 
+    @property
+    def _use_precomputed_aips(self) -> bool:
+        """True when pre-computed NPZ AIPs are available (``aips_dir`` is set)."""
+        return self.aips_dir is not None
+
+    def _build_pairs(self) -> None:
+        """Populate ``self.pairs`` from ``self.slice_ids``, respecting any active slice filter."""
+        self.pairs = [
+            (self.slice_ids[i], self.slice_ids[i + 1])
+            for i in range(len(self.slice_ids) - 1)
+            if self._filter_slices is None or self.slice_ids[i + 1] in self._filter_slices
+        ]
+
+    def _pair_label(self, fid: int, mid: int) -> str:
+        """Return the display label for a pair (fid → mid), including metrics if available."""
+        label = f"z{fid:02d} → z{mid:02d}"
+        if mid in self.existing_transforms:
+            metrics_path = self.existing_transforms[mid] / "pairwise_registration_metrics.json"
+            metrics = load_pairwise_metrics(metrics_path)
+            mag = self._get_metric(metrics, "translation_magnitude")
+            if mag is not None:
+                label += f"  ({mag:.0f}px)"
+        return label
+
     def _build_ui(self) -> None:
         # Outer layout holds a scroll area so the panel never overflows
         outer = QVBoxLayout()
@@ -225,14 +275,7 @@ class ManualAlignWidget(QWidget):
 
         self.pair_combo = QComboBox()
         for fid, mid in self.pairs:
-            label = f"z{fid:02d} → z{mid:02d}"
-            if mid in self.existing_transforms:
-                metrics_path = self.existing_transforms[mid] / "pairwise_registration_metrics.json"
-                metrics = load_pairwise_metrics(metrics_path)
-                mag = self._get_metric(metrics, "translation_magnitude")
-                if mag is not None:
-                    label += f"  ({mag:.0f}px)"
-            self.pair_combo.addItem(label)
+            self.pair_combo.addItem(self._pair_label(fid, mid))
         self.pair_combo.currentIndexChanged.connect(self._on_pair_changed)
         nav_row.addWidget(self.pair_combo, stretch=1)
 
@@ -417,33 +460,6 @@ class ManualAlignWidget(QWidget):
         self._tile_row_label.setVisible(False)
         self.spin_tile.setVisible(False)
 
-        self.spin_gamma = QDoubleSpinBox()
-        self.spin_gamma.setRange(0.1, 2.0)
-        self.spin_gamma.setDecimals(2)
-        self.spin_gamma.setSingleStep(0.05)
-        self.spin_gamma.setValue(0.6)
-        self.spin_gamma.setToolTip("Gamma correction (< 1 boosts midtones)")
-        self.spin_gamma.valueChanged.connect(self._on_gamma_changed)
-        disp_form.addRow("Gamma:", self.spin_gamma)
-
-        self.spin_opacity_moving = QDoubleSpinBox()
-        self.spin_opacity_moving.setRange(0.1, 1.0)
-        self.spin_opacity_moving.setDecimals(2)
-        self.spin_opacity_moving.setSingleStep(0.05)
-        self.spin_opacity_moving.setValue(1.0)
-        self.spin_opacity_moving.setToolTip("Opacity of the moving (red) layer")
-        self.spin_opacity_moving.valueChanged.connect(self._on_opacity_moving_changed)
-        disp_form.addRow("Moving opacity:", self.spin_opacity_moving)
-
-        self.spin_opacity_fixed = QDoubleSpinBox()
-        self.spin_opacity_fixed.setRange(0.1, 1.0)
-        self.spin_opacity_fixed.setDecimals(2)
-        self.spin_opacity_fixed.setSingleStep(0.05)
-        self.spin_opacity_fixed.setValue(1.0)
-        self.spin_opacity_fixed.setToolTip("Opacity of the fixed (green) layer")
-        self.spin_opacity_fixed.valueChanged.connect(self._on_opacity_fixed_changed)
-        disp_form.addRow("Fixed opacity:", self.spin_opacity_fixed)
-
         layout.addWidget(disp_group)
 
         # ── Save ──────────────────────────────────────────────────────────────
@@ -564,17 +580,9 @@ class ManualAlignWidget(QWidget):
             return AlignmentState()
         tx, ty, rot, tfm_center = load_transform(tfm_files[0])
         scale = 2**self.level
-        # Adjust for rotation center difference between automated transform and our image center
         img_center = self.pair_centers.get(mid)
-        if img_center is not None and abs(rot) > 0.01:
-            img_cx = img_center[0] * scale
-            img_cy = img_center[1] * scale
-            dcx = tfm_center[0] - img_cx
-            dcy = tfm_center[1] - img_cy
-            rad = np.radians(rot)
-            cos_r, sin_r = np.cos(rad), np.sin(rad)
-            tx += (1 - cos_r) * dcx + sin_r * dcy
-            ty += -sin_r * dcx + (1 - cos_r) * dcy
+        if img_center is not None:
+            tx, ty = adjust_for_rotation_center(tx, ty, rot, tfm_center, (img_center[0] * scale, img_center[1] * scale))
         return AlignmentState(tx=tx / scale, ty=ty / scale, rotation=rot)
 
     def _load_pair(self, idx: int) -> None:
@@ -600,12 +608,12 @@ class ManualAlignWidget(QWidget):
             fixed_aip, fixed_scale_yx = self._load_aip_from_npz(aip_paths[fid])
             moving_aip, moving_scale_yx = self._load_aip_from_npz(aip_paths[mid])
         else:
-            fixed_aip, fixed_scale_yx = self._load_aip_from_zarr(self.slice_paths[fid])
-            moving_aip, moving_scale_yx = self._load_aip_from_zarr(self.slice_paths[mid])
+            fixed_aip, fixed_scale_yx = load_aip_from_ome_zarr(self.slice_paths[fid], level=self.level)
+            moving_aip, moving_scale_yx = load_aip_from_ome_zarr(self.slice_paths[mid], level=self.level)
 
         # Normalize to [0, 1] for display
-        fixed_aip = self._normalize(fixed_aip)
-        moving_aip = self._normalize(moving_aip)
+        fixed_aip = normalize_aip(fixed_aip)
+        moving_aip = normalize_aip(moving_aip)
 
         # Store raw (normalized) AIPs so enhancement can be changed without reloading from disk
         self._raw_fixed_aip = fixed_aip.copy()
@@ -627,23 +635,21 @@ class ManualAlignWidget(QWidget):
         while len(self.viewer.layers) > 0:
             self.viewer.layers.pop(0)
 
-        # Compute shared contrast limits from both AIPs
-        clim = (0.0, 1.0)
-        gamma = self.spin_gamma.value()
-        opacity_fixed = self.spin_opacity_fixed.value()
-        opacity_moving = self.spin_opacity_moving.value()
-
         view_suffix = {"xy": "", "xz": " (XZ)", "yz": " (YZ)"}.get(self._projection_mode, "")
 
-        # Always add both individual layers (hidden in non-color modes)
+        # Physical scale lives in layer.affine for all modes; identity scale on the layer.
+        self._moving_scale_yx = list(moving_scale_yx)
+
+        # Always add both individual layers (hidden in non-color modes).
+        # Gamma=0.6 is a good initial value for OCT data; users can adjust in napari's
+        # layer controls.  Contrast limits are fixed at [0, 1] since AIPs are normalised.
         self.fixed_layer = self.viewer.add_image(
             fixed_aip,
             name=f"Fixed z{fid:02d}{view_suffix}",
             colormap="green",
             blending="additive",
-            contrast_limits=clim,
-            gamma=gamma,
-            opacity=opacity_fixed,
+            contrast_limits=(0.0, 1.0),
+            gamma=0.6,
             scale=fixed_scale_yx,
         )
         self.moving_layer = self.viewer.add_image(
@@ -651,17 +657,13 @@ class ManualAlignWidget(QWidget):
             name=f"Moving z{mid:02d}{view_suffix}",
             colormap="red",
             blending="additive",
-            contrast_limits=clim,
-            gamma=gamma,
-            opacity=opacity_moving,
-            scale=moving_scale_yx,
+            contrast_limits=(0.0, 1.0),
+            gamma=0.6,
+            scale=[1.0, 1.0],
         )
 
         # Adjust visibility / add composite layer based on current overlay mode
         self._rebuild_layer_visibility()
-
-        # Connect layer translate events for bidirectional sync (XY mode only)
-        self.moving_layer.events.translate.connect(self._on_layer_translated)
 
         # Initialize or restore undo stack
         if mid not in self.undo_stacks:
@@ -703,43 +705,35 @@ class ManualAlignWidget(QWidget):
         scale_yx = list(scale[1:]) if len(scale) == 3 else list(scale)
         return aip, scale_yx
 
-    def _load_aip_from_zarr(self, zarr_path: Path) -> tuple[np.ndarray, list[float]]:
-        """Load a volume from OME-Zarr and compute the AIP."""
-        return load_aip_from_ome_zarr(zarr_path, level=self.level)
-
-    def _normalize(self, img: np.ndarray) -> np.ndarray:
-        return normalize_aip(img)
-
     # ----- Overlay helpers -----
 
     def _make_shifted_moving(self, state: AlignmentState) -> np.ndarray:
-        """Return the moving AIP with rotation + pixel-level shift baked in."""
+        """Return the moving AIP with rotation + pixel-level shift baked in (for composite modes)."""
         moving = self._original_moving_aip
         if moving is None:
             return np.zeros((1, 1), dtype=np.float32)
         return apply_transform(moving, rotation=state.rotation, tx=state.tx, ty=state.ty)
 
-    def _compute_composite(self, fixed: np.ndarray, shifted_moving: np.ndarray) -> np.ndarray:
-        """Build a composite image for Difference or Checkerboard overlay modes."""
-        return build_overlay(fixed, shifted_moving, mode=self._overlay_mode, tile_size=self.spin_tile.value())
-
     def _rebuild_layer_visibility(self) -> None:
-        """Show/hide individual layers and manage composite layer for current overlay mode."""
         is_color = self._overlay_mode == OVERLAY_COLOR
+        colormap = "inferno" if self._overlay_mode == OVERLAY_DIFF else "gray"
 
         if self.fixed_layer is not None:
             self.fixed_layer.visible = is_color
         if self.moving_layer is not None:
             self.moving_layer.visible = is_color
 
-        # Remove stale composite layer
-        if self._composite_layer is not None:
-            with contextlib.suppress(ValueError):
-                self.viewer.layers.remove(self._composite_layer)
-            self._composite_layer = None
-
-        if not is_color and self._original_fixed_aip is not None and self.fixed_layer is not None:
-            colormap = "inferno" if self._overlay_mode == OVERLAY_DIFF else "gray"
+        if is_color:
+            # Switching to color mode — remove composite if present.
+            if self._composite_layer is not None:
+                with contextlib.suppress(ValueError):
+                    self.viewer.layers.remove(self._composite_layer)
+                self._composite_layer = None
+        elif self._composite_layer is not None:
+            # Already have a composite layer; just update the colormap in-place
+            # (avoids tearing down and recreating the layer when switching Diff ↔ Checker).
+            self._composite_layer.colormap = colormap
+        elif self._original_fixed_aip is not None and self.fixed_layer is not None:
             comp = np.zeros_like(self._original_fixed_aip)
             self._composite_layer = self.viewer.add_image(
                 comp,
@@ -747,7 +741,6 @@ class ManualAlignWidget(QWidget):
                 colormap=colormap,
                 blending="translucent",
                 contrast_limits=(0.0, 1.0),
-                gamma=self.spin_gamma.value(),
                 scale=list(self.fixed_layer.scale),
             )
 
@@ -758,7 +751,9 @@ class ManualAlignWidget(QWidget):
         if self._original_fixed_aip is None or self._original_moving_aip is None:
             return
         shifted = self._make_shifted_moving(state)
-        self._composite_layer.data = self._compute_composite(self._original_fixed_aip, shifted)
+        self._composite_layer.data = build_overlay(
+            self._original_fixed_aip, shifted, mode=self._overlay_mode, tile_size=self.spin_tile.value()
+        )
 
     # ----- State application -----
 
@@ -771,33 +766,31 @@ class ManualAlignWidget(QWidget):
 
         if push:
             self.undo_stacks[mid].push(state)
-            self.unsaved_changes.add(mid)
+        shape = self._original_moving_aip.shape[:2]
 
         if self._projection_mode == "xy":
-            # Apply rotation to image data (translation handled via layer.translate)
-            rotated = apply_transform(self._original_moving_aip, rotation=state.rotation)
-            self.moving_layer.data = rotated
-
-            # Apply translation via layer translate
-            scale = self.moving_layer.scale
-            self._suppress_translate_event = True
-            self.moving_layer.translate = [state.ty * scale[0], state.tx * scale[1]]
-            self._suppress_translate_event = False
+            # Build a data→world affine that encodes scale, rotation about the image
+            # centre, and translation.  napari renders it natively - no pixel resampling.
+            self.moving_layer.affine = build_moving_affine(
+                state.rotation,
+                state.tx,
+                state.ty,
+                self._moving_scale_yx,
+                shape,
+            )
         else:
-            # XZ/YZ mode: no rotation, show Z-offset as vertical shift
-            self.moving_layer.data = self._original_moving_aip.copy()
-
+            # XZ/YZ mode: no rotation; Z-offset expressed as vertical (row) translation.
+            # tx controls the horizontal position in XZ; ty controls it in YZ.
             offsets = self._current_offsets.get(mid, (0, 0))
-            scale_factor = 2**self.level
-            dz_display = (offsets[0] - offsets[1]) / scale_factor
-
-            scale = self.moving_layer.scale
-            self._suppress_translate_event = True
-            if self._projection_mode == "xz":
-                self.moving_layer.translate = [dz_display * scale[0], state.tx * scale[1]]
-            else:  # yz
-                self.moving_layer.translate = [dz_display * scale[0], state.ty * scale[1]]
-            self._suppress_translate_event = False
+            dz_display = (offsets[0] - offsets[1]) / 2**self.level
+            horiz = state.tx if self._projection_mode == "xz" else state.ty
+            self.moving_layer.affine = build_moving_affine(
+                0.0,
+                horiz,
+                dz_display,
+                self._moving_scale_yx,
+                shape,
+            )
 
         # Update composite overlay if active
         if self._overlay_mode != OVERLAY_COLOR and self._projection_mode == "xy":
@@ -850,32 +843,6 @@ class ManualAlignWidget(QWidget):
         self._suppress_spinbox_event = False
         state = AlignmentState(tx=self.spin_tx.value(), ty=self.spin_ty.value(), rotation=rot)
         self._apply_state(state, push=True)
-        self._update_status()
-
-    def _on_layer_translated(self, _event) -> None:
-        """Sync spinboxes when the user drags the moving layer."""
-        if self._suppress_translate_event or self.moving_layer is None:
-            return
-
-        # In XZ/YZ mode, ignore drag events (the vertical axis is controlled by Z-offsets)
-        if self._projection_mode != "xy":
-            state = self._current_state()
-            self._apply_state(state, push=False)
-            return
-
-        translate = self.moving_layer.translate
-        scale = self.moving_layer.scale
-        ty = translate[0] / scale[0]
-        tx = translate[1] / scale[1]
-
-        self._suppress_spinbox_event = True
-        self.spin_tx.setValue(tx)
-        self.spin_ty.setValue(ty)
-        self._suppress_spinbox_event = False
-
-        mid = self.pairs[self.current_pair_idx][1]
-        state = AlignmentState(tx=tx, ty=ty, rotation=self.spin_rot.value())
-        self.undo_stacks[mid].push(state)
         self._update_status()
 
     # ----- Projection and Z-offset handlers -----
@@ -978,17 +945,9 @@ class ManualAlignWidget(QWidget):
 
         tx, ty, rot, tfm_center = load_transform(tfm_files[0])
         scale = 2**self.level
-        # Adjust for rotation center difference
         img_center = self.pair_centers.get(mid)
-        if img_center is not None and abs(rot) > 0.01:
-            img_cx = img_center[0] * scale
-            img_cy = img_center[1] * scale
-            dcx = tfm_center[0] - img_cx
-            dcy = tfm_center[1] - img_cy
-            rad = np.radians(rot)
-            cos_r, sin_r = np.cos(rad), np.sin(rad)
-            tx += (1 - cos_r) * dcx + sin_r * dcy
-            ty += -sin_r * dcx + (1 - cos_r) * dcy
+        if img_center is not None:
+            tx, ty = adjust_for_rotation_center(tx, ty, rot, tfm_center, (img_center[0] * scale, img_center[1] * scale))
         state = AlignmentState(tx=tx / scale, ty=ty / scale, rotation=rot)
         self._apply_state(state, push=True)
         self.viewer.status = f"Loaded automated transform for z{mid:02d}: tx={state.tx:.1f} ty={state.ty:.1f} rot={rot:.2f}°"
@@ -1081,7 +1040,6 @@ class ManualAlignWidget(QWidget):
             if pkg_aips.exists():
                 self.aips_dir = pkg_aips
                 self.slice_paths = self._discover_aips(pkg_aips)
-                self._use_precomputed_aips = True
                 self.slice_ids = list(self.slice_paths.keys())
 
                 # Discover axis-specific AIPs
@@ -1129,10 +1087,7 @@ class ManualAlignWidget(QWidget):
 
     def _rebuild_pairs(self) -> None:
         """Rebuild pair list after slice discovery changes, then reload UI."""
-        self.pairs = []
-        for i in range(len(self.slice_ids) - 1):
-            fid, mid = self.slice_ids[i], self.slice_ids[i + 1]
-            self.pairs.append((fid, mid))
+        self._build_pairs()
 
         if not self.pairs:
             self.viewer.status = "No slice pairs found after download"
@@ -1142,14 +1097,7 @@ class ManualAlignWidget(QWidget):
         self.pair_combo.blockSignals(True)
         self.pair_combo.clear()
         for fid, mid in self.pairs:
-            label = f"z{fid:02d} → z{mid:02d}"
-            if mid in self.existing_transforms:
-                metrics_path = self.existing_transforms[mid] / "pairwise_registration_metrics.json"
-                metrics = load_pairwise_metrics(metrics_path)
-                mag = self._get_metric(metrics, "translation_magnitude")
-                if mag is not None:
-                    label += f"  (mag={mag:.0f}px)"
-            self.pair_combo.addItem(label)
+            self.pair_combo.addItem(self._pair_label(fid, mid))
         self.pair_combo.blockSignals(False)
 
         self.current_pair_idx = 0
@@ -1230,121 +1178,13 @@ class ManualAlignWidget(QWidget):
     # ----- Keybindings -----
 
     def _install_keybindings(self) -> None:
-        viewer = self.viewer
+        for key, method_name, args in _KEYBINDINGS:
+            method = getattr(self, method_name)
+            self.viewer.bind_key(key, lambda _v, m=method, a=args: m(*a))
 
-        @viewer.bind_key("n")
-        def _next(viewer):
-            self._next_pair()
-
-        @viewer.bind_key("p")
-        def _prev(viewer):
-            self._prev_pair()
-
-        @viewer.bind_key("s")
-        def _save(viewer):
-            self._save_current()
-
-        # Fine translation (1px at working resolution)
-        @viewer.bind_key("Right")
-        def _right(viewer):
-            self._nudge_translate(1, 0)
-
-        @viewer.bind_key("Left")
-        def _left(viewer):
-            self._nudge_translate(-1, 0)
-
-        @viewer.bind_key("Up")
-        def _up(viewer):
-            self._nudge_translate(0, -1)
-
-        @viewer.bind_key("Down")
-        def _down(viewer):
-            self._nudge_translate(0, 1)
-
-        # Coarse translation (10px)
-        @viewer.bind_key("Shift-Right")
-        def _right10(viewer):
-            self._nudge_translate(10, 0)
-
-        @viewer.bind_key("Shift-Left")
-        def _left10(viewer):
-            self._nudge_translate(-10, 0)
-
-        @viewer.bind_key("Shift-Up")
-        def _up10(viewer):
-            self._nudge_translate(0, -10)
-
-        @viewer.bind_key("Shift-Down")
-        def _down10(viewer):
-            self._nudge_translate(0, 10)
-
-        # Large translation (50px)
-        @viewer.bind_key("Control-Right")
-        def _right50(viewer):
-            self._nudge_translate(50, 0)
-
-        @viewer.bind_key("Control-Left")
-        def _left50(viewer):
-            self._nudge_translate(-50, 0)
-
-        @viewer.bind_key("Control-Up")
-        def _up50(viewer):
-            self._nudge_translate(0, -50)
-
-        @viewer.bind_key("Control-Down")
-        def _down50(viewer):
-            self._nudge_translate(0, 50)
-
-        # Rotation
-        @viewer.bind_key("]")
-        def _rot_cw(viewer):
-            self._nudge_rotate(0.1)
-
-        @viewer.bind_key("[")
-        def _rot_ccw(viewer):
-            self._nudge_rotate(-0.1)
-
-        @viewer.bind_key("Shift-]")
-        def _rot_cw_coarse(viewer):
-            self._nudge_rotate(1.0)
-
-        @viewer.bind_key("Shift-[")
-        def _rot_ccw_coarse(viewer):
-            self._nudge_rotate(-1.0)
-
-        @viewer.bind_key("Control-]")
-        def _rot_cw_large(viewer):
-            self._nudge_rotate(5.0)
-
-        @viewer.bind_key("Control-[")
-        def _rot_ccw_large(viewer):
-            self._nudge_rotate(-5.0)
-
-        # Undo/redo (Ctrl+Z / Ctrl+Shift+Z)
-        @viewer.bind_key("Control-z")
-        def _undo(viewer):
-            self._undo()
-
-        @viewer.bind_key("Control-Shift-z")
-        def _redo(viewer):
-            self._redo()
-
-    def _on_gamma_changed(self, value: float) -> None:
-        if self._overlay_mode == OVERLAY_COLOR:
-            if self.fixed_layer is not None:
-                self.fixed_layer.gamma = value
-            if self.moving_layer is not None:
-                self.moving_layer.gamma = value
-        elif self._composite_layer is not None:
-            self._composite_layer.gamma = value
-
-    def _on_opacity_moving_changed(self, value: float) -> None:
-        if self._overlay_mode == OVERLAY_COLOR and self.moving_layer is not None:
-            self.moving_layer.opacity = value
-
-    def _on_opacity_fixed_changed(self, value: float) -> None:
-        if self._overlay_mode == OVERLAY_COLOR and self.fixed_layer is not None:
-            self.fixed_layer.opacity = value
+        # Undo/redo use dedicated macOS-aware labels, so keep them explicit
+        self.viewer.bind_key("Control-z", lambda _v: self._undo())
+        self.viewer.bind_key("Control-Shift-z", lambda _v: self._redo())
 
     def _on_overlay_mode_changed(self, _: int = 0) -> None:
         self._overlay_mode = [OVERLAY_COLOR, OVERLAY_DIFF, OVERLAY_CHECKER][self.combo_overlay.currentIndex()]
@@ -1373,7 +1213,8 @@ class ManualAlignWidget(QWidget):
         self._original_moving_aip = enhance_aip(self._raw_moving_aip, self._enhance_mode)
 
         if self.fixed_layer is not None:
-            self.fixed_layer.data = self._original_fixed_aip
+            # Update moving layer data then re-apply the affine/translate state.
+            self.moving_layer.data = self._original_moving_aip
         if self.moving_layer is not None:
             # Re-apply rotation + translation on top of the new enhanced base
             state = self._current_state()
@@ -1495,7 +1336,6 @@ class ManualAlignWidget(QWidget):
         """Load a previously downloaded package without hitting the server."""
         self.aips_dir = aips_dir
         self.slice_paths = self._discover_aips(aips_dir)
-        self._use_precomputed_aips = True
         self.slice_ids = list(self.slice_paths.keys())
 
         # Discover axis-specific AIPs

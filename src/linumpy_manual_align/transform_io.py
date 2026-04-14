@@ -14,6 +14,47 @@ import numpy as np
 import SimpleITK as sitk
 
 
+def adjust_for_rotation_center(
+    tx: float,
+    ty: float,
+    rot_deg: float,
+    tfm_center: tuple[float, float],
+    img_center: tuple[float, float],
+) -> tuple[float, float]:
+    """Correct (tx, ty) for a mismatch between a transform's rotation centre and the image centre.
+
+    The linumpy stacking pipeline saves transforms whose rotation centre is the
+    image centre at the full resolution used during registration.  When that
+    centre differs from the image centre at the current display level, the
+    translation must be adjusted so that the visual result is the same.
+
+    Parameters
+    ----------
+    tx, ty:
+        Raw translation from the saved transform (at the transform's own scale).
+    rot_deg:
+        Rotation angle in degrees.
+    tfm_center:
+        ``(cx, cy)`` rotation centre stored in the transform file (pixels).
+    img_center:
+        ``(cx, cy)`` centre of the image as currently displayed (pixels).
+
+    Returns
+    -------
+    tuple[float, float]
+        Adjusted ``(tx, ty)``.
+    """
+    if abs(rot_deg) <= 0.01:
+        return tx, ty
+    dcx = tfm_center[0] - img_center[0]
+    dcy = tfm_center[1] - img_center[1]
+    rad = np.radians(rot_deg)
+    cos_r, sin_r = np.cos(rad), np.sin(rad)
+    tx += (1.0 - cos_r) * dcx + sin_r * dcy
+    ty += -sin_r * dcx + (1.0 - cos_r) * dcy
+    return tx, ty
+
+
 def load_transform(tfm_path: Path) -> tuple[float, float, float, tuple[float, float]]:
     """Load a .tfm file and return (tx, ty, rotation_deg, center_xy).
 
