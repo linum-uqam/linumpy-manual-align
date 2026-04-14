@@ -36,6 +36,7 @@ from qtpy.QtWidgets import (
 )
 from scipy.ndimage import rotate as ndimage_rotate
 
+from linumpy_manual_align.omezarr_io import load_aip_from_ome_zarr
 from linumpy_manual_align.transform_io import (
     discover_slices,
     discover_transforms,
@@ -555,11 +556,7 @@ class ManualAlignWidget(QWidget):
 
     def _load_aip_from_zarr(self, zarr_path: Path) -> tuple[np.ndarray, list[float]]:
         """Load a volume from OME-Zarr and compute the AIP."""
-        from linumpy.io.zarr import read_omezarr
-
-        vol, scale = read_omezarr(str(zarr_path), level=self.level)
-        aip = np.asarray(vol).mean(axis=0).astype(np.float32)
-        return aip, list(scale[1:])  # YX only
+        return load_aip_from_ome_zarr(zarr_path, level=self.level)
 
     def _normalize(self, img: np.ndarray) -> np.ndarray:
         p_low = np.percentile(img[img > 0], 1) if np.any(img > 0) else 0

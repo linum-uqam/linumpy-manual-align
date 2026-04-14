@@ -30,7 +30,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-zarr = ["linumpy"]
+zarr = ["ome-zarr>=0.9"]
 dev = ["pytest", "ruff", "ty"]
 
 [project.scripts]
@@ -48,9 +48,6 @@ environments = [
     "sys_platform == 'darwin' and platform_machine == 'arm64'",
     "sys_platform == 'linux' and platform_machine == 'x86_64'",
 ]
-
-[tool.uv.sources]
-linumpy = { path = "../linumpy", editable = true }
 
 # --- ruff ---
 [tool.ruff]
@@ -75,4 +72,4 @@ extra-paths = ["src"]
 possibly-unresolved-reference = "error"
 
 [tool.ty.analysis]
-replace-imports-with-any = ["linumpy.**", "napari.**", "numpy.**", "scipy.**", "SimpleITK.**", "qtpy.**"]
+replace-imports-with-any = ["napari.**", "numpy.**", "scipy.**", "SimpleITK.**", "qtpy.**", "ome_zarr.**"]

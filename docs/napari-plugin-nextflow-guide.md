@@ -70,7 +70,7 @@ manual_align_package/
 
 ### 3) Direct OME-Zarr workflow
 
-Requires linumpy zarr support:
+Requires the optional ome-zarr extra:
 
 ```bash
 linumpy-manual-align \

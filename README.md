@@ -15,7 +15,7 @@ in the [linumpy](https://github.com/linum-uqam/linumpy) reconstruction pipeline.
 # From GitHub:
 uv pip install git+https://github.com/linum-uqam/linumpy-manual-align.git
 
-# With OME-Zarr support (requires linumpy):
+# With OME-Zarr support (ome-zarr extra):
 uv pip install "linumpy-manual-align[zarr] @ git+https://github.com/linum-uqam/linumpy-manual-align.git"
 
 # For development:
@@ -54,7 +54,7 @@ If the data package has already been downloaded:
 linumpy-manual-align --data_package /path/to/manual_align_package/
 ```
 
-### Directly from OME-Zarr volumes (requires linumpy `[zarr]` extra)
+### Directly from OME-Zarr volumes (requires the `ome-zarr` extra)
 
 ```bash
 linumpy-manual-align \

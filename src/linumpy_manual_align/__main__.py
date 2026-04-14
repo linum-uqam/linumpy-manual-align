@@ -14,7 +14,7 @@ Usage
         --data_package /path/to/manual_align_package/ \\
         --server_config ~/Downloads/sub-22/nextflow.config
 
-    # Or directly from OME-Zarr volumes (requires linumpy):
+    # Or directly from OME-Zarr volumes (requires the ome-zarr extra):
     linumpy-manual-align \\
         --input_dir /path/to/bring_to_common_space/ \\
         --transforms_dir /path/to/register_pairwise/ \\
