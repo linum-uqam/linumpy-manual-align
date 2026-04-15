@@ -939,9 +939,9 @@ class ManualAlignWidget(QWidget):
                 self._update_initial_cs_position(fid, mid)
                 self._update_cs_slider_visibility()
                 self._ensure_readers_for_pair()
-                # If readers already open for both slices, refresh immediately
-                if fid in self._readers and mid in self._readers:
-                    self._refresh_cross_section()
+                # Reader already open (e.g. view-mode switch XZ↔YZ): init slider now
+                if mid in self._readers:
+                    self._init_cs_slider_from_reader(mid)
             else:
                 self._set_cs_sliders_visible(False)
         else:
@@ -1210,22 +1210,18 @@ class ManualAlignWidget(QWidget):
         worker.start()
         self._cs_loading_label.setText("Opening remote reader for moving slice…")
 
-    def _on_reader_ready(self, sid: int, reader: RemoteSliceReader) -> None:
-        """Called when the moving-slice SliceReaderWorker finishes opening."""
-        self._reader_workers.pop(sid, None)
-        self._readers[sid] = reader
+    def _init_cs_slider_from_reader(self, mid: int) -> None:
+        """Initialise the active cross-section slider from the already-open reader for *mid*.
 
-        if not self.pairs:
+        Sets slider range, initial value (tissue centroid + XY-transform offset),
+        and requests the first cross-section fetch.  Safe to call whenever the reader
+        is already open but the slider has not yet been wired (e.g. after a view-mode switch).
+        """
+        reader = self._readers.get(mid)
+        if reader is None:
             return
-        fid, mid = self.pairs[self.current_pair_idx]
-        if sid != mid:
-            return
-
         self._cs_loading_label.setText("")
         _nz, ny, nx = reader.shape
-
-        # Initial moving position: tissue centroid (from NPZ center_pos) offset by
-        # the current XY transform so the reader opens on matching tissue.
         axis = self._projection_mode  # "xz" or "yz"
         center = self._cross_section_y if axis == "xz" else self._cross_section_x
         init = center + self._cs_moving_offset(axis)
@@ -1247,9 +1243,20 @@ class ManualAlignWidget(QWidget):
             self._lbl_cs_x.setText(str(init))
             self._cross_section_x = init
 
-        # Fetch moving slice at initial position; fixed layer already shows static NPZ
         self._request_cross_section(mid, axis, init)
-        _ = fid  # fixed slice uses static NPZ, no remote fetch needed
+
+    def _on_reader_ready(self, sid: int, reader: RemoteSliceReader) -> None:
+        """Called when the moving-slice SliceReaderWorker finishes opening."""
+        self._reader_workers.pop(sid, None)
+        self._readers[sid] = reader
+
+        if not self.pairs:
+            return
+        _fid, mid = self.pairs[self.current_pair_idx]
+        if sid != mid:
+            return
+
+        self._init_cs_slider_from_reader(mid)
 
     def _on_reader_failed(self, sid: int, msg: str) -> None:
         """Called when a SliceReaderWorker fails to open."""
