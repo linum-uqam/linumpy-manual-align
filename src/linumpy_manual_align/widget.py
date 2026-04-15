@@ -1056,6 +1056,12 @@ class ManualAlignWidget(QWidget):
         if self._overlay_mode != OVERLAY_COLOR and self._projection_mode == "xy":
             self._refresh_composite(state)
 
+        # In XZ/YZ mode an XY-transform change shifts which column of the moving zarr
+        # we should display.  Refresh immediately (from cache) and queue a re-fetch.
+        if self._projection_mode in ("xz", "yz"):
+            self._refresh_cross_section()
+            self._cs_debounce_timer.start(150)
+
         # Sync spinboxes
         self._suppress_spinbox_event = True
         self.spin_tx.setValue(state.tx)
@@ -1245,11 +1251,12 @@ class ManualAlignWidget(QWidget):
             self._lbl_cs_x.setText(str(init_x))
             self._cross_section_x = init_x
 
-            # Fetch the initial position
+            # Fetch the initial position (moving slice offset by current XY transform)
             axis = self._projection_mode  # "xz" or "yz"
-            pos = init_y if axis == "xz" else init_x
-            self._request_cross_section(fid, axis, pos)
-            self._request_cross_section(mid, axis, pos)
+            fixed_pos = init_y if axis == "xz" else init_x
+            moving_pos = fixed_pos + self._cs_moving_offset(axis)
+            self._request_cross_section(fid, axis, fixed_pos)
+            self._request_cross_section(mid, axis, moving_pos)
         elif not self._reader_workers:
             self._cs_loading_label.setText(f"Waiting for z{fid:02d} / z{mid:02d}…")
 
@@ -1299,30 +1306,48 @@ class ManualAlignWidget(QWidget):
     def _on_cross_section_failed(self, sid: int, axis: str, pos: int, msg: str) -> None:
         logger.warning(f"Cross-section fetch failed z{sid:02d} {axis}[{pos}]: {msg}")
 
+    def _cs_moving_offset(self, axis: str) -> int:
+        """Pixel offset to add to the fixed slider position to show matching tissue in the moving slice.
+
+        The moving slice has been shifted by (tx, ty) relative to the fixed slice (at working
+        resolution self.level).  To see the same anatomical tissue in both cross-sections we must
+        fetch the moving slice at a different column:
+          XZ view (Y slider):  moving_y = fixed_y - ty * scale
+          YZ view (X slider):  moving_x = fixed_x - tx * scale
+        where scale = 2 ** (self.level - self._cs_level) converts from working-res pixels to
+        cross-section-level pixels.
+        """
+        state = self._current_state()
+        scale = 2 ** (self.level - self._cs_level)
+        if axis == "xz":
+            return -round(state.ty * scale)
+        return -round(state.tx * scale)
+
     def _refresh_cross_section(self) -> None:
         """Update layer data from the cache for the current pair and position."""
         if not self.pairs or self._projection_mode == "xy":
             return
         fid, mid = self.pairs[self.current_pair_idx]
         axis = self._projection_mode
-        pos = self._cross_section_y if axis == "xz" else self._cross_section_x
-        for sid, layer in ((fid, self.fixed_layer), (mid, self.moving_layer)):
+        fixed_pos = self._cross_section_y if axis == "xz" else self._cross_section_x
+        moving_pos = fixed_pos + self._cs_moving_offset(axis)
+        for sid, layer, pos in ((fid, self.fixed_layer, fixed_pos), (mid, self.moving_layer, moving_pos)):
             img = self._cs_cache.get(sid, {}).get(axis, {}).get(pos)
             if img is not None and layer is not None:
                 layer.data = normalize_aip(img.astype(np.float32))
 
     def _on_cs_slider_settled(self) -> None:
-        """Called after the debounce timer fires — fetch both slices at the new position."""
+        """Called after the debounce timer fires — fetch both slices at the (offset-corrected) position."""
         if not self.pairs or self._projection_mode == "xy":
             return
         fid, mid = self.pairs[self.current_pair_idx]
         axis = self._projection_mode
-        pos = self._cross_section_y if axis == "xz" else self._cross_section_x
-        self._request_cross_section(fid, axis, pos)
-        self._request_cross_section(mid, axis, pos)
-        # Kick off prefetch (handled in widget-prefetch step)
-        self._prefetch_around(fid, axis, pos)
-        self._prefetch_around(mid, axis, pos)
+        fixed_pos = self._cross_section_y if axis == "xz" else self._cross_section_x
+        moving_pos = fixed_pos + self._cs_moving_offset(axis)
+        self._request_cross_section(fid, axis, fixed_pos)
+        self._request_cross_section(mid, axis, moving_pos)
+        self._prefetch_around(fid, axis, fixed_pos)
+        self._prefetch_around(mid, axis, moving_pos)
 
     def _prefetch_around(self, sid: int, axis: str, pos: int) -> None:
         """Pre-fetch cross-sections at ±5 steps around *pos* for *sid*.
