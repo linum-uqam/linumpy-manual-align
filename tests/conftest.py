@@ -8,6 +8,14 @@ import numpy as np
 import pytest
 
 
+@pytest.fixture(scope="session")
+def qapp():
+    """Session-scoped QApplication instance, required for QObject-based tests."""
+    from napari.qt import get_qapp
+
+    return get_qapp()
+
+
 @pytest.fixture
 def fake_data_package(tmp_path: Path) -> Path:
     """Create a minimal fake data package with AIPs and transforms."""

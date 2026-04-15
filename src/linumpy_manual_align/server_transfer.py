@@ -127,6 +127,7 @@ class RemoteSliceReader:
         scale : list[float]
             2-element scale list [z_scale, lateral_scale].
         """
+        assert self._process.stdin is not None and self._process.stdout is not None
         with self._lock:
             self._process.stdin.write(f"{axis},{pos}\n".encode())
             self._process.stdin.flush()
@@ -184,6 +185,7 @@ def open_remote_slice_reader(
     )
 
     # Read the "ready Z Y X s0,s1,s2" handshake (up to 30 s for zarr load)
+    assert proc.stdout is not None and proc.stderr is not None
     try:
         line = proc.stdout.readline().decode().strip()
     except Exception as exc:

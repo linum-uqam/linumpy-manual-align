@@ -251,3 +251,33 @@ One `slice_z##/` folder per corrected pair, each containing `transform.tfm`,
   and the difference image quantifies remaining misalignment precisely.
 - Download and upload use `scp`; remote directory creation uses `ssh`.  Ensure
   SSH key authentication is configured for the server host.
+
+---
+
+## Code Architecture (for contributors)
+
+The package is split into focused modules:
+
+| Module | Responsibility |
+|--------|---------------|
+| `widget.py` | Main napari dock widget — thin coordinator that wires all modules together |
+| `ui_builder.py` | Qt widget construction helpers; each `build_*` function returns a `SimpleNamespace` of named child widgets so the widget can assign them as attributes without owning the construction logic |
+| `cross_section.py` | `CrossSectionManager` — a `QObject` that owns remote OME-Zarr reader lifecycle, cross-section image cache, and prefetch; emits `reader_ready`, `cross_section_ready` signals |
+| `image_utils.py` | Pure numpy/scipy image functions: `normalize_aip`, `enhance_aip`, `apply_transform`, `build_overlay`, `content_bbox` — no Qt/napari dependencies |
+| `transform_io.py` | SimpleITK `.tfm` save/load; AIP/pair-AIP NPZ discovery (`discover_aips`, `discover_pair_aips`); pairwise metrics I/O; shared `_SLICE_PATTERN` regex |
+| `server_transfer.py` | SCP/SSH background workers (`ScpWorker`, `SliceReaderWorker`, `CrossSectionWorker`), `RemoteSliceReader`, and `parse_server_config` |
+| `omezarr_io.py` | Optional: load AIP directly from an OME-Zarr pyramid (requires the `zarr` extra) |
+| `state.py` | `AlignmentState` dataclass and bounded `UndoStack` |
+
+### Running tests
+
+```bash
+# All tests
+uv run pytest tests/ -v
+
+# Individual modules
+uv run pytest tests/test_image_utils.py -v     # pure image functions
+uv run pytest tests/test_transform_io.py -v    # I/O and discovery
+uv run pytest tests/test_cross_section.py -v   # CrossSectionManager
+```
+

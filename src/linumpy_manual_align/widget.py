@@ -21,33 +21,22 @@ from __future__ import annotations
 
 import contextlib
 import logging
-import sys
+import re
 from pathlib import Path
 
 import napari
 import numpy as np
-from qtpy.QtCore import Qt, QTimer
+from qtpy.QtCore import QTimer
 from qtpy.QtWidgets import (
-    QButtonGroup,
-    QComboBox,
-    QDoubleSpinBox,
     QFileDialog,
-    QFormLayout,
-    QGroupBox,
-    QHBoxLayout,
     QLabel,
-    QLineEdit,
     QMessageBox,
-    QProgressBar,
-    QPushButton,
-    QScrollArea,
-    QSlider,
-    QSpinBox,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
 
+from linumpy_manual_align.cross_section import CrossSectionManager
 from linumpy_manual_align.image_utils import (
     ENHANCE_CLAHE,
     ENHANCE_EDGES,
@@ -63,28 +52,33 @@ from linumpy_manual_align.image_utils import (
     normalize_aip,
 )
 from linumpy_manual_align.omezarr_io import load_aip_from_ome_zarr
-from linumpy_manual_align.server_transfer import (
-    CrossSectionWorker,
-    RemoteSliceReader,
-    ScpWorker,
-    SliceReaderWorker,
-)
+from linumpy_manual_align.server_transfer import ScpWorker
 from linumpy_manual_align.state import AlignmentState, UndoStack
 from linumpy_manual_align.transform_io import (
     adjust_for_rotation_center,
+    discover_aips,
+    discover_pair_aips,
     discover_slices,
     discover_transforms,
+    get_metric,
+    load_aip_from_npz,
     load_offsets,
     load_pairwise_metrics,
     load_transform,
     save_transform,
 )
+from linumpy_manual_align.ui_builder import (
+    build_display_group,
+    build_mode_row,
+    build_navigation_row,
+    build_save_row,
+    build_scroll_content,
+    build_server_group,
+    build_xy_page,
+    build_z_page,
+)
 
 logger = logging.getLogger(__name__)
-
-_IS_MACOS = sys.platform == "darwin"
-_UNDO_LABEL = "Undo (⌘Z)" if _IS_MACOS else "Undo (Ctrl+Z)"
-_REDO_LABEL = "Redo (⌘⇧Z)" if _IS_MACOS else "Redo (Ctrl+Shift+Z)"
 
 # ---------------------------------------------------------------------------
 # Widget
@@ -158,7 +152,7 @@ class ManualAlignWidget(QWidget):
 
         # Discover slices — from AIP package or OME-Zarr directory
         if self.aips_dir is not None:
-            self.slice_paths = self._discover_aips(self.aips_dir)
+            self.slice_paths = discover_aips(self.aips_dir)
         elif self.input_dir is not None:
             self.slice_paths = discover_slices(self.input_dir)
         else:
@@ -166,14 +160,14 @@ class ManualAlignWidget(QWidget):
             self.slice_paths = {}
 
         # Discover axis-specific AIPs (XZ, YZ projections)
-        self.slice_paths_xz = self._discover_aips(self.aips_xz_dir) if self.aips_xz_dir else {}
-        self.slice_paths_yz = self._discover_aips(self.aips_yz_dir) if self.aips_yz_dir else {}
+        self.slice_paths_xz = discover_aips(self.aips_xz_dir) if self.aips_xz_dir else {}
+        self.slice_paths_yz = discover_aips(self.aips_yz_dir) if self.aips_yz_dir else {}
         # Paired XZ/YZ files — share a common column per pair for correct visual alignment
         self.pair_paths_xz: dict[tuple[int, int], dict[str, Path]] = (
-            self._discover_pair_aips(self.aips_xz_dir) if self.aips_xz_dir else {}
+            discover_pair_aips(self.aips_xz_dir) if self.aips_xz_dir else {}
         )
         self.pair_paths_yz: dict[tuple[int, int], dict[str, Path]] = (
-            self._discover_pair_aips(self.aips_yz_dir) if self.aips_yz_dir else {}
+            discover_pair_aips(self.aips_yz_dir) if self.aips_yz_dir else {}
         )
 
         self.slice_ids = list(self.slice_paths.keys())
@@ -210,20 +204,12 @@ class ManualAlignWidget(QWidget):
         self._close_confirmed = False
 
         # ── Interactive XZ/YZ via remote OME-Zarr ──────────────────────────────
-        # Populated from manual_align_metadata.json after package load.
-        self._slices_remote_dir: str | None = None
-        self._cs_level: int = 0
-        # One persistent SSH reader per slice ID — opened lazily, kept open.
-        self._readers: dict[int, RemoteSliceReader] = {}
-        # SliceReaderWorker threads opening readers (sid → worker).
-        self._reader_workers: dict[int, SliceReaderWorker] = {}
-        # CrossSectionWorker threads for in-flight requests.
-        self._cs_workers: list[CrossSectionWorker] = []
-        # Cache: sid → axis → pos → img_array
-        self._cs_cache: dict[int, dict[str, dict[int, np.ndarray]]] = {}
-        # Exact remote zarr filename per slice ID (e.g. "slice_z02_normalize.ome.zarr").
-        # Loaded from metadata; falls back to "slice_z{sid:02d}.ome.zarr" when absent.
-        self._slice_filenames: dict[int, str] = {}
+        # CrossSectionManager owns readers, cache, prefetch, and metadata.
+        self._cs_mgr = CrossSectionManager(parent=self)
+        self._cs_mgr.reader_ready.connect(self._on_reader_ready)
+        self._cs_mgr.reader_failed.connect(self._on_reader_failed)
+        self._cs_mgr.cross_section_ready.connect(self._on_cross_section_ready)
+        self._cs_mgr.cross_section_failed.connect(self._on_cross_section_failed)
         # Moving slice cross-section position (slider-controlled; fixed slice uses static NPZ).
         self._cross_section_y: int = 0
         self._cross_section_x: int = 0
@@ -257,19 +243,32 @@ class ManualAlignWidget(QWidget):
 
     # ----- UI construction -----
 
-    @staticmethod
-    def _form(spacing: int = 4) -> QFormLayout:
-        """Return a consistently styled QFormLayout."""
-        f = QFormLayout()
-        f.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        f.setFieldGrowthPolicy(QFormLayout.ExpandingFieldsGrow)
-        f.setSpacing(spacing)
-        return f
-
     @property
     def _use_precomputed_aips(self) -> bool:
         """True when pre-computed NPZ AIPs are available (``aips_dir`` is set)."""
         return self.aips_dir is not None
+
+    @contextlib.contextmanager
+    def _suppress_events(self):  # type: ignore[return]
+        """Context manager that suppresses spinbox-changed signals.
+
+        Guarantees the flag is restored even if an exception is raised inside
+        the block, eliminating the fragile set/finally pattern.
+        """
+        self._suppress_spinbox_event = True
+        try:
+            yield
+        finally:
+            self._suppress_spinbox_event = False
+
+    @contextlib.contextmanager
+    def _suppress_z_events(self):  # type: ignore[return]
+        """Context manager that suppresses Z-offset spinbox-changed signals."""
+        self._suppress_z_offset_event = True
+        try:
+            yield
+        finally:
+            self._suppress_z_offset_event = False
 
     def _set_cs_sliders_visible(self, visible: bool) -> None:
         """Show or hide the interactive cross-section slider rows."""
@@ -286,7 +285,7 @@ class ManualAlignWidget(QWidget):
 
     def _update_cs_slider_visibility(self) -> None:
         """Show the correct cross-section slider for the current projection mode."""
-        if self._slices_remote_dir is None:
+        if self._cs_mgr.slices_remote_dir is None:
             return
         xz = self._projection_mode == "xz"
         yz = self._projection_mode == "yz"
@@ -300,8 +299,6 @@ class ManualAlignWidget(QWidget):
 
     def _refresh_saved_pairs(self) -> None:
         """Scan output_dir and pre-populate saved_pairs with already-written transforms."""
-        import re
-
         if not self.output_dir.exists():
             return
         pattern = re.compile(r"slice_z(\d+)$")
@@ -324,343 +321,126 @@ class ManualAlignWidget(QWidget):
         if mid in self.existing_transforms:
             metrics_path = self.existing_transforms[mid] / "pairwise_registration_metrics.json"
             metrics = load_pairwise_metrics(metrics_path)
-            mag = self._get_metric(metrics, "translation_magnitude")
+            mag = get_metric(metrics, "translation_magnitude")
             if mag is not None:
                 label += f"  ({mag:.0f}px)"
         return label
 
     def _build_ui(self) -> None:
-        # Outer layout holds a scroll area so the panel never overflows
+        # ── Outer scroll area ────────────────────────────────────────────────
         outer = QVBoxLayout()
         outer.setContentsMargins(0, 0, 0, 0)
         self.setLayout(outer)
-
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QScrollArea.NoFrame)
+        scroll, layout = build_scroll_content()
         outer.addWidget(scroll)
 
-        content = QWidget()
-        layout = QVBoxLayout()
-        layout.setContentsMargins(6, 6, 6, 6)
-        layout.setSpacing(6)
-        content.setLayout(layout)
-        scroll.setWidget(content)
-
         # ── Pair navigation ───────────────────────────────────────────────────
-        nav_row = QHBoxLayout()
-        nav_row.setSpacing(4)
-
-        self.btn_prev = QPushButton("◀ Prev (P)")
-        self.btn_prev.clicked.connect(self._prev_pair)
-        nav_row.addWidget(self.btn_prev)
-
-        self.pair_combo = QComboBox()
-        for fid, mid in self.pairs:
-            self.pair_combo.addItem(self._pair_label(fid, mid))
-        self.pair_combo.currentIndexChanged.connect(self._on_pair_changed)
-        nav_row.addWidget(self.pair_combo, stretch=1)
-
-        self.btn_next = QPushButton("Next (N) ▶")
-        self.btn_next.clicked.connect(self._next_pair)
-        nav_row.addWidget(self.btn_next)
-
-        layout.addLayout(nav_row)
+        nav_layout, nav = build_navigation_row(
+            pairs=self.pairs,
+            pair_labels=[self._pair_label(fid, mid) for fid, mid in self.pairs],
+            on_prev=self._prev_pair,
+            on_next=self._next_pair,
+            on_combo_changed=self._on_pair_changed,
+        )
+        self.btn_prev = nav.btn_prev
+        self.btn_next = nav.btn_next
+        self.pair_combo = nav.pair_combo
+        layout.addLayout(nav_layout)
 
         # ── Mode toggle buttons ───────────────────────────────────────────────
-        mode_row = QHBoxLayout()
-        mode_row.setSpacing(0)
-
-        self._btn_mode_xy = QPushButton("XY Alignment")
-        self._btn_mode_xy.setCheckable(True)
-        self._btn_mode_xy.setChecked(True)
-        self._btn_mode_xy.setToolTip("Lateral alignment: adjust TX, TY, and Rotation  [M to toggle]")
-        self._btn_mode_xy.toggled.connect(lambda checked: self._on_mode_btn_toggled("xy", checked))
-        mode_row.addWidget(self._btn_mode_xy)
-
-        self._btn_mode_z = QPushButton("Z Alignment")
-        self._btn_mode_z.setCheckable(True)
-        self._btn_mode_z.setChecked(False)
-        self._btn_mode_z.setToolTip("Depth alignment: adjust Z-overlap offsets, view XZ/YZ cross-sections  [M to toggle]")
-        self._btn_mode_z.toggled.connect(lambda checked: self._on_mode_btn_toggled("z", checked))
-        mode_row.addWidget(self._btn_mode_z)
-
         has_axis_aips = bool(self.slice_paths_xz or self.slice_paths_yz or self.pair_paths_xz or self.pair_paths_yz)
-        if not has_axis_aips:
-            self._btn_mode_z.setEnabled(False)
-            self._btn_mode_z.setToolTip("XZ/YZ projections not available — regenerate the data package to enable")
-
-        layout.addLayout(mode_row)
+        mode_layout, mode = build_mode_row(
+            has_axis_aips=has_axis_aips,
+            on_xy_toggled=lambda checked: self._on_mode_btn_toggled("xy", checked),
+            on_z_toggled=lambda checked: self._on_mode_btn_toggled("z", checked),
+        )
+        self._btn_mode_xy = mode.btn_mode_xy
+        self._btn_mode_z = mode.btn_mode_z
+        layout.addLayout(mode_layout)
 
         # ── Stacked content (sizes to active page only) ───────────────────────
         self._mode_stack = QStackedWidget()
         layout.addWidget(self._mode_stack)
 
-        # Page 0 - XY Alignment ───────────────────────────────────────────────
-        xy_page = QWidget()
-        xy_layout = QVBoxLayout()
-        xy_layout.setContentsMargins(0, 4, 0, 0)
-        xy_layout.setSpacing(4)
-        xy_page.setLayout(xy_layout)
-
-        xy_form = self._form()
-        self.spin_tx = QDoubleSpinBox()
-        self.spin_tx.setRange(-2000, 2000)
-        self.spin_tx.setDecimals(1)
-        self.spin_tx.setSingleStep(1.0)
-        self.spin_tx.setSuffix(" px")
-        self.spin_tx.valueChanged.connect(self._on_spinbox_changed)
-        xy_form.addRow("TX:", self.spin_tx)
-
-        self.spin_ty = QDoubleSpinBox()
-        self.spin_ty.setRange(-2000, 2000)
-        self.spin_ty.setDecimals(1)
-        self.spin_ty.setSingleStep(1.0)
-        self.spin_ty.setSuffix(" px")
-        self.spin_ty.valueChanged.connect(self._on_spinbox_changed)
-        xy_form.addRow("TY:", self.spin_ty)
-
-        self.spin_rot = QDoubleSpinBox()
-        self.spin_rot.setRange(-180, 180)
-        self.spin_rot.setDecimals(2)
-        self.spin_rot.setSingleStep(0.1)
-        self.spin_rot.setSuffix("°")
-        self.spin_rot.valueChanged.connect(self._on_rotation_changed)
-        xy_form.addRow("Rotation:", self.spin_rot)
-
-        self.rot_slider = QSlider(Qt.Horizontal)
-        self.rot_slider.setRange(-1800, 1800)
-        self.rot_slider.setValue(0)
-        self.rot_slider.valueChanged.connect(self._on_rotation_slider_changed)
-        xy_form.addRow("", self.rot_slider)
-
-        xy_layout.addLayout(xy_form)
-
-        xy_hint = QLabel(
-            "<i style='color: grey;'>Arrow: 1px · Alt: 10px · Ctrl: 50px · [/]: 0.1° · Alt[/]: 1° · Ctrl[/]: 5°</i>"
+        # Page 0 - XY Alignment
+        xy_page, xy = build_xy_page(
+            on_spinbox_changed=self._on_spinbox_changed,
+            on_rotation_changed=self._on_rotation_changed,
+            on_rotation_slider_changed=self._on_rotation_slider_changed,
+            on_load_auto=self._load_automated_transform,
+            on_reset=self._reset_transform,
+            on_undo=self._undo,
+            on_redo=self._redo,
         )
-        xy_hint.setWordWrap(True)
-        xy_layout.addWidget(xy_hint)
-
-        row1 = QHBoxLayout()
-        self.btn_load_auto = QPushButton("Load Automated")
-        self.btn_load_auto.clicked.connect(self._load_automated_transform)
-        row1.addWidget(self.btn_load_auto)
-        self.btn_reset = QPushButton("Reset")
-        self.btn_reset.clicked.connect(self._reset_transform)
-        row1.addWidget(self.btn_reset)
-        xy_layout.addLayout(row1)
-
-        row2 = QHBoxLayout()
-        self.btn_undo = QPushButton(_UNDO_LABEL)
-        self.btn_undo.clicked.connect(self._undo)
-        row2.addWidget(self.btn_undo)
-        self.btn_redo = QPushButton(_REDO_LABEL)
-        self.btn_redo.clicked.connect(self._redo)
-        row2.addWidget(self.btn_redo)
-        xy_layout.addLayout(row2)
-
+        self.spin_tx = xy.spin_tx
+        self.spin_ty = xy.spin_ty
+        self.spin_rot = xy.spin_rot
+        self.rot_slider = xy.rot_slider
+        self.btn_load_auto = xy.btn_load_auto
+        self.btn_reset = xy.btn_reset
+        self.btn_undo = xy.btn_undo
+        self.btn_redo = xy.btn_redo
         self._mode_stack.addWidget(xy_page)
 
-        # Page 1 - Z Alignment ────────────────────────────────────────────────
-        z_page = QWidget()
-        z_layout = QVBoxLayout()
-        z_layout.setContentsMargins(0, 4, 0, 0)
-        z_layout.setSpacing(4)
-        z_page.setLayout(z_layout)
-
-        z_form = self._form()
-
-        self._btn_proj_xz = QPushButton("XZ")
-        self._btn_proj_xz.setCheckable(True)
-        self._btn_proj_xz.setChecked(True)
-        self._btn_proj_xz.setToolTip("Front cross-section (Z-X plane)  [V to toggle]")
-        self._btn_proj_yz = QPushButton("YZ")
-        self._btn_proj_yz.setCheckable(True)
-        self._btn_proj_yz.setToolTip("Side cross-section (Z-Y plane)  [V to toggle]")
-        self._proj_btn_group = QButtonGroup(self)
-        self._proj_btn_group.setExclusive(True)
-        self._proj_btn_group.addButton(self._btn_proj_xz, 0)
-        self._proj_btn_group.addButton(self._btn_proj_yz, 1)
-        self._proj_btn_group.idClicked.connect(self._on_z_proj_changed)
-        proj_row = QHBoxLayout()
-        proj_row.setSpacing(4)
-        proj_row.addWidget(self._btn_proj_xz)
-        proj_row.addWidget(self._btn_proj_yz)
-        proj_row.addStretch()
-        z_form.addRow("View:", proj_row)
-
-        self.spin_fixed_z = QSpinBox()
-        self.spin_fixed_z.setRange(0, 200)
-        self.spin_fixed_z.setSuffix(" voxels")
-        self.spin_fixed_z.setToolTip("Z-index in the fixed (bottom/green) slice where overlap begins")
-        self.spin_fixed_z.valueChanged.connect(self._on_z_offset_changed)
-        z_form.addRow("Fixed Z start:", self.spin_fixed_z)
-
-        self.spin_moving_z = QSpinBox()
-        self.spin_moving_z.setRange(0, 200)
-        self.spin_moving_z.setSuffix(" voxels")
-        self.spin_moving_z.setToolTip("Z-index in the moving (top/red) slice where overlap begins")
-        self.spin_moving_z.valueChanged.connect(self._on_z_offset_changed)
-        z_form.addRow("Moving Z start:", self.spin_moving_z)
-
-        self.z_relative_label = QLabel("Relative shift: 0 voxels")
-        z_form.addRow("", self.z_relative_label)
-
-        # Interactive cross-section sliders (only shown when a remote reader is active)
-        self.slider_cs_y = QSlider(Qt.Horizontal)
-        self.slider_cs_y.setMinimum(0)
-        self.slider_cs_y.setMaximum(0)
-        self.slider_cs_y.setValue(0)
-        self.slider_cs_y.setEnabled(False)
-        self.slider_cs_y.setToolTip("Moving slice Y position — slide to find matching tissue  [Alt-, / Alt-.]")
-        self._lbl_cs_y = QLabel("0")
-        self._lbl_cs_y.setFixedWidth(40)
-        cs_y_row = QHBoxLayout()
-        cs_y_row.setSpacing(4)
-        cs_y_row.addWidget(self.slider_cs_y)
-        cs_y_row.addWidget(self._lbl_cs_y)
-        self._cs_y_form_row_label = QLabel("Moving Y:")
-        z_form.addRow(self._cs_y_form_row_label, cs_y_row)
-
-        self.slider_cs_x = QSlider(Qt.Horizontal)
-        self.slider_cs_x.setMinimum(0)
-        self.slider_cs_x.setMaximum(0)
-        self.slider_cs_x.setValue(0)
-        self.slider_cs_x.setEnabled(False)
-        self.slider_cs_x.setToolTip("Moving slice X position — slide to find matching tissue  [Alt-, / Alt-.]")
-        self._lbl_cs_x = QLabel("0")
-        self._lbl_cs_x.setFixedWidth(40)
-        cs_x_row = QHBoxLayout()
-        cs_x_row.setSpacing(4)
-        cs_x_row.addWidget(self.slider_cs_x)
-        cs_x_row.addWidget(self._lbl_cs_x)
-        self._cs_x_form_row_label = QLabel("Moving X:")
-        z_form.addRow(self._cs_x_form_row_label, cs_x_row)
-
-        # Loading indicator shown while a reader is opening
-        self._cs_loading_label = QLabel("")
-        self._cs_loading_label.setStyleSheet("color: grey; font-style: italic;")
-        z_form.addRow("", self._cs_loading_label)
-
-        # Hide both slider rows initially; shown once remote metadata is available
+        # Page 1 - Z Alignment
+        z_page, z = build_z_page(
+            parent_widget=self,
+            on_proj_changed=self._on_z_proj_changed,
+            on_fixed_z_changed=self._on_z_offset_changed,
+            on_moving_z_changed=self._on_z_offset_changed,
+        )
+        self._btn_proj_xz = z.btn_proj_xz
+        self._btn_proj_yz = z.btn_proj_yz
+        self._proj_btn_group = z.proj_btn_group
+        self.spin_fixed_z = z.spin_fixed_z
+        self.spin_moving_z = z.spin_moving_z
+        self.z_relative_label = z.z_relative_label
+        self.slider_cs_y = z.slider_cs_y
+        self._lbl_cs_y = z.lbl_cs_y
+        self._cs_y_form_row_label = z.cs_y_form_row_label
+        self.slider_cs_x = z.slider_cs_x
+        self._lbl_cs_x = z.lbl_cs_x
+        self._cs_x_form_row_label = z.cs_x_form_row_label
+        self._cs_loading_label = z.cs_loading_label
         self._set_cs_sliders_visible(False)
-
-        z_layout.addLayout(z_form)
-
-        z_hint = QLabel("<i style='color: grey;'>Align tissue boundaries visible in the cross-section overlay.</i>")
-        z_hint.setWordWrap(True)
-        z_layout.addWidget(z_hint)
-
         self._mode_stack.addWidget(z_page)
 
         # ── Display ───────────────────────────────────────────────────────────
-        disp_group = QGroupBox("Display")
-        disp_form = self._form()
-        disp_group.setLayout(disp_form)
-
-        self.combo_overlay = QComboBox()
-        self.combo_overlay.addItems(["Color (R/G)", "Difference", "Checkerboard"])
-        self.combo_overlay.setToolTip(
-            "Color: additive red/green overlay\n"
-            "Difference: |fixed - moving| grayscale (misalignment = bright)\n"
-            "Checkerboard: alternating tiles of fixed/moving"
+        disp_group, disp = build_display_group(
+            on_overlay_changed=self._on_overlay_mode_changed,
+            on_enhance_changed=self._on_enhance_changed,
+            on_tile_size_changed=self._on_tile_size_changed,
         )
-        self.combo_overlay.currentIndexChanged.connect(self._on_overlay_mode_changed)
-        disp_form.addRow("Overlay:", self.combo_overlay)
-
-        self.combo_enhance = QComboBox()
-        self.combo_enhance.addItems(["None", "Edges (Sobel)", "CLAHE", "Sharpen"])
-        self.combo_enhance.setToolTip(
-            "None: display normalized AIP as-is\n"
-            "Edges: Sobel gradient magnitude - highlights tissue boundaries\n"
-            "  Best for oblique/angled cuts where edges are the key landmark\n"
-            "CLAHE: adaptive histogram equalization - equalises local contrast\n"
-            "  Best for sagittal cuts where projection blur hides boundaries\n"
-            "Sharpen: unsharp mask - mild crispening for blurry projections"
-        )
-        self.combo_enhance.currentIndexChanged.connect(self._on_enhance_changed)
-        disp_form.addRow("Enhance:", self.combo_enhance)
-
-        self.spin_tile = QSpinBox()
-        self.spin_tile.setRange(2, 512)
-        self.spin_tile.setValue(16)
-        self.spin_tile.setSingleStep(4)
-        self.spin_tile.setToolTip("Checkerboard tile size (pixels at current pyramid level)")
-        self.spin_tile.valueChanged.connect(self._on_tile_size_changed)
-        self._tile_row_label = QLabel("Tile size:")
-        disp_form.addRow(self._tile_row_label, self.spin_tile)
-        self._tile_row_label.setVisible(False)
-        self.spin_tile.setVisible(False)
-
+        self.combo_overlay = disp.combo_overlay
+        self.combo_enhance = disp.combo_enhance
+        self.spin_tile = disp.spin_tile
+        self._tile_row_label = disp.tile_row_label
         layout.addWidget(disp_group)
 
         # ── Save ──────────────────────────────────────────────────────────────
-        save_row = QHBoxLayout()
-        self.btn_save = QPushButton("Save Current (S)")
-        self.btn_save.clicked.connect(self._save_current)
-        save_row.addWidget(self.btn_save)
-        self.btn_save_all = QPushButton("Save All && Exit")
-        self.btn_save_all.clicked.connect(self._save_all_and_exit)
-        save_row.addWidget(self.btn_save_all)
-        layout.addLayout(save_row)
+        save_layout, save = build_save_row(
+            on_save=self._save_current,
+            on_save_all=self._save_all_and_exit,
+        )
+        self.btn_save = save.btn_save
+        self.btn_save_all = save.btn_save_all
+        layout.addLayout(save_layout)
 
         # ── Server ────────────────────────────────────────────────────────────
-        server_group = QGroupBox("Server")
-        server_layout = QVBoxLayout()
-        server_layout.setSpacing(4)
-        server_group.setLayout(server_layout)
-
-        cfg_row = QHBoxLayout()
-        cfg_row.addWidget(QLabel("Config:"))
-        self.config_path_edit = QLineEdit()
-        self.config_path_edit.setPlaceholderText("nextflow.config path…")
-        self.config_path_edit.setReadOnly(True)
-        cfg_row.addWidget(self.config_path_edit, stretch=1)
-        self.btn_browse_config = QPushButton("Browse…")
-        self.btn_browse_config.clicked.connect(self._browse_server_config)
-        cfg_row.addWidget(self.btn_browse_config)
-        server_layout.addLayout(cfg_row)
-
-        host_row = QHBoxLayout()
-        host_row.addWidget(QLabel("Host:"))
-        self.host_edit = QLineEdit("132.207.157.41")
-        self.host_edit.setPlaceholderText("server hostname or IP")
-        self.host_edit.textChanged.connect(self._on_host_changed)
-        host_row.addWidget(self.host_edit, stretch=1)
-        server_layout.addLayout(host_row)
-
-        srv_btn_row = QHBoxLayout()
-        self.btn_download = QPushButton("⬇ Download Data")
-        self.btn_download.setToolTip("Download AIPs and transforms from the server.")
-        self.btn_download.clicked.connect(self._download_from_server)
-        srv_btn_row.addWidget(self.btn_download)
-        self.btn_upload = QPushButton("⬆ Upload Transforms")
-        self.btn_upload.setToolTip("Upload saved manual transforms to the server.")
-        self.btn_upload.clicked.connect(self._upload_to_server)
-        srv_btn_row.addWidget(self.btn_upload)
-        server_layout.addLayout(srv_btn_row)
-
-        self.server_progress = QProgressBar()
-        self.server_progress.setRange(0, 0)
-        self.server_progress.setTextVisible(False)
-        self.server_progress.setFixedHeight(6)
-        self.server_progress.hide()
-        server_layout.addWidget(self.server_progress)
-
-        self.server_status_label = QLabel("")
-        self.server_status_label.setWordWrap(True)
-        server_layout.addWidget(self.server_status_label)
-
-        if self.server_config is not None:
-            if hasattr(self.server_config, "config_path") and self.server_config.config_path:
-                self.config_path_edit.setText(str(self.server_config.config_path))
-            self.host_edit.setText(self.server_config.host)
-        else:
-            self.btn_download.setEnabled(False)
-            self.btn_upload.setEnabled(False)
-            self.server_status_label.setText("<i>Browse for a nextflow.config to enable server features</i>")
-
+        server_group, srv = build_server_group(
+            server_config=self.server_config,
+            on_browse=self._browse_server_config,
+            on_host_changed=self._on_host_changed,
+            on_download=self._download_from_server,
+            on_upload=self._upload_to_server,
+        )
+        self.config_path_edit = srv.config_path_edit
+        self.btn_browse_config = srv.btn_browse_config
+        self.host_edit = srv.host_edit
+        self.btn_download = srv.btn_download
+        self.btn_upload = srv.btn_upload
+        self.server_progress = srv.server_progress
+        self.server_status_label = srv.server_status_label
         layout.addWidget(server_group)
 
         # ── Status ────────────────────────────────────────────────────────────
@@ -688,36 +468,6 @@ class ManualAlignWidget(QWidget):
 
     # ----- AIP discovery -----
 
-    @staticmethod
-    def _discover_aips(aips_dir: Path) -> dict[int, Path]:
-        """Discover pre-computed AIP .npz files."""
-        import re
-
-        pattern = re.compile(r"slice_z(\d+)")
-        aips = {}
-        for p in sorted(aips_dir.iterdir()):
-            m = pattern.search(p.name)
-            if m and p.name.endswith(".npz"):
-                aips[int(m.group(1))] = p
-        return dict(sorted(aips.items()))
-
-    @staticmethod
-    def _discover_pair_aips(aips_dir: Path) -> dict[tuple[int, int], dict[str, Path]]:
-        """Discover paired XZ/YZ NPZ files (``pair_z{fid:02d}_z{mid:02d}_{role}.npz``).
-
-        Returns ``{(fid, mid): {"fixed": Path, "moving": Path}}``.
-        """
-        import re
-
-        pattern = re.compile(r"pair_z(\d+)_z(\d+)_(fixed|moving)\.npz$")
-        result: dict[tuple[int, int], dict[str, Path]] = {}
-        for p in sorted(aips_dir.iterdir()):
-            m = pattern.match(p.name)
-            if m:
-                key = (int(m.group(1)), int(m.group(2)))
-                result.setdefault(key, {})[m.group(3)] = p
-        return result
-
     def _discover_axis_aip_dirs(self, pkg_root: Path) -> None:
         """Discover aips_xz/ and aips_yz/ directories in the package root."""
         for name, attr, paths_attr, pair_attr in [
@@ -727,8 +477,8 @@ class ManualAlignWidget(QWidget):
             candidate = pkg_root / name
             if candidate.exists():
                 setattr(self, attr, candidate)
-                setattr(self, paths_attr, self._discover_aips(candidate))
-                setattr(self, pair_attr, self._discover_pair_aips(candidate))
+                setattr(self, paths_attr, discover_aips(candidate))
+                setattr(self, pair_attr, discover_pair_aips(candidate))
 
         # Enable the Z Alignment button if axis AIPs are now available
         has_axis_aips = bool(self.slice_paths_xz or self.slice_paths_yz or self.pair_paths_xz or self.pair_paths_yz)
@@ -805,11 +555,11 @@ class ManualAlignWidget(QWidget):
             _use_paired = False
 
         if self._projection_mode in ("xz", "yz") and _fixed_npz is not None and _moving_npz is not None:
-            fixed_aip, fixed_scale_yx = self._load_aip_from_npz(_fixed_npz)
-            moving_aip, moving_scale_yx = self._load_aip_from_npz(_moving_npz)
+            fixed_aip, fixed_scale_yx = load_aip_from_npz(_fixed_npz)
+            moving_aip, moving_scale_yx = load_aip_from_npz(_moving_npz)
         elif self._use_precomputed_aips:
-            fixed_aip, fixed_scale_yx = self._load_aip_from_npz(self.slice_paths[fid])
-            moving_aip, moving_scale_yx = self._load_aip_from_npz(self.slice_paths[mid])
+            fixed_aip, fixed_scale_yx = load_aip_from_npz(self.slice_paths[fid])
+            moving_aip, moving_scale_yx = load_aip_from_npz(self.slice_paths[mid])
         else:
             fixed_aip, fixed_scale_yx = load_aip_from_ome_zarr(self.slice_paths[fid], level=self.level)
             moving_aip, moving_scale_yx = load_aip_from_ome_zarr(self.slice_paths[mid], level=self.level)
@@ -916,31 +666,29 @@ class ManualAlignWidget(QWidget):
             self._current_offsets[mid] = offsets
 
         # Update Z-offset spinboxes
-        self._suppress_z_offset_event = True
-        self.spin_fixed_z.setValue(self._current_offsets[mid][0])
-        self.spin_moving_z.setValue(self._current_offsets[mid][1])
-        self._suppress_z_offset_event = False
+        with self._suppress_z_events():
+            self.spin_fixed_z.setValue(self._current_offsets[mid][0])
+            self.spin_moving_z.setValue(self._current_offsets[mid][1])
         self._update_z_relative_label()
 
         state = self.undo_stacks[mid].current
         self._apply_state(state, push=False)
 
         # Update UI
-        self._suppress_spinbox_event = True
-        self.pair_combo.setCurrentIndex(idx)
-        self._suppress_spinbox_event = False
+        with self._suppress_events():
+            self.pair_combo.setCurrentIndex(idx)
         self._update_status()
 
         # Interactive cross-section sliders
         if self._projection_mode in ("xz", "yz"):
-            if self._slices_remote_dir is not None:
+            if self._cs_mgr.slices_remote_dir is not None:
                 # Estimate tissue centroid from the static NPZ so the initial
                 # remote fetch lands on tissue rather than the volume edge.
                 self._update_initial_cs_position(fid, mid)
                 self._update_cs_slider_visibility()
                 self._ensure_readers_for_pair()
                 # Reader already open (e.g. view-mode switch XZ↔YZ): init slider now
-                if mid in self._readers:
+                if self._cs_mgr.has_reader(mid):
                     self._init_cs_slider_from_reader(mid)
             else:
                 self._set_cs_sliders_visible(False)
@@ -950,15 +698,6 @@ class ManualAlignWidget(QWidget):
         if not preserve_camera:
             self.viewer.reset_view()
         self.viewer.status = f"Pair z{fid:02d} → z{mid:02d} loaded ({self._projection_mode.upper()} view)"
-
-    def _load_aip_from_npz(self, npz_path: Path) -> tuple[np.ndarray, list[float]]:
-        """Load pre-computed AIP from an .npz file."""
-        data = np.load(str(npz_path))
-        aip = data["aip"].astype(np.float32)
-        scale = data["scale"]
-        # Scale is (Z, Y, X) from OME-Zarr; return YX only
-        scale_yx = list(scale[1:]) if len(scale) == 3 else list(scale)
-        return aip, scale_yx
 
     # ----- Overlay helpers -----
 
@@ -1057,12 +796,11 @@ class ManualAlignWidget(QWidget):
             self._refresh_composite(state)
 
         # Sync spinboxes
-        self._suppress_spinbox_event = True
-        self.spin_tx.setValue(state.tx)
-        self.spin_ty.setValue(state.ty)
-        self.spin_rot.setValue(state.rotation)
-        self.rot_slider.setValue(int(state.rotation * 10))
-        self._suppress_spinbox_event = False
+        with self._suppress_events():
+            self.spin_tx.setValue(state.tx)
+            self.spin_ty.setValue(state.ty)
+            self.spin_rot.setValue(state.rotation)
+            self.rot_slider.setValue(int(state.rotation * 10))
 
     def _current_state(self) -> AlignmentState:
         return AlignmentState(
@@ -1088,9 +826,8 @@ class ManualAlignWidget(QWidget):
         if self._suppress_spinbox_event:
             return
         state = self._current_state()
-        self._suppress_spinbox_event = True
-        self.rot_slider.setValue(int(state.rotation * 10))
-        self._suppress_spinbox_event = False
+        with self._suppress_events():
+            self.rot_slider.setValue(int(state.rotation * 10))
         self._apply_state(state, push=True)
         self._update_status()
 
@@ -1098,9 +835,8 @@ class ManualAlignWidget(QWidget):
         if self._suppress_spinbox_event:
             return
         rot = value / 10.0
-        self._suppress_spinbox_event = True
-        self.spin_rot.setValue(rot)
-        self._suppress_spinbox_event = False
+        with self._suppress_events():
+            self.spin_rot.setValue(rot)
         state = AlignmentState(tx=self.spin_tx.value(), ty=self.spin_ty.value(), rotation=rot)
         self._apply_state(state, push=True)
         self._update_status()
@@ -1196,18 +932,12 @@ class ManualAlignWidget(QWidget):
 
         The fixed slice is always shown from the static downloaded NPZ — no reader needed.
         """
-        if not self.pairs or self._slices_remote_dir is None or self.server_config is None:
+        if not self.pairs or self.server_config is None:
             return
         _fid, mid = self.pairs[self.current_pair_idx]
-        if mid in self._readers or mid in self._reader_workers:
+        if self._cs_mgr.has_reader(mid):
             return
-        zarr_name = self._slice_filenames.get(mid, f"slice_z{mid:02d}.ome.zarr")
-        remote_path = f"{self._slices_remote_dir}/{zarr_name}"
-        worker = SliceReaderWorker(self.server_config, mid, remote_path, self._cs_level)
-        worker.ready.connect(self._on_reader_ready)
-        worker.failed.connect(self._on_reader_failed)
-        self._reader_workers[mid] = worker
-        worker.start()
+        self._cs_mgr.ensure_reader(self.server_config, mid)
         self._cs_loading_label.setText("Opening remote reader for moving slice…")
 
     def _init_cs_slider_from_reader(self, mid: int) -> None:
@@ -1217,11 +947,11 @@ class ManualAlignWidget(QWidget):
         and requests the first cross-section fetch.  Safe to call whenever the reader
         is already open but the slider has not yet been wired (e.g. after a view-mode switch).
         """
-        reader = self._readers.get(mid)
-        if reader is None:
+        shape = self._cs_mgr.reader_shape(mid)
+        if shape is None:
             return
         self._cs_loading_label.setText("")
-        _nz, ny, nx = reader.shape
+        _nz, ny, nx = shape
         axis = self._projection_mode  # "xz" or "yz"
         center = self._cross_section_y if axis == "xz" else self._cross_section_x
         init = center + self._cs_moving_offset(axis)
@@ -1243,48 +973,23 @@ class ManualAlignWidget(QWidget):
             self._lbl_cs_x.setText(str(init))
             self._cross_section_x = init
 
-        self._request_cross_section(mid, axis, init)
+        self._cs_mgr.request(mid, axis, init)
 
-    def _on_reader_ready(self, sid: int, reader: RemoteSliceReader) -> None:
-        """Called when the moving-slice SliceReaderWorker finishes opening."""
-        self._reader_workers.pop(sid, None)
-        self._readers[sid] = reader
-
+    def _on_reader_ready(self, sid: int, reader: object) -> None:
+        """Called when ``CrossSectionManager`` finishes opening a reader."""
         if not self.pairs:
             return
         _fid, mid = self.pairs[self.current_pair_idx]
         if sid != mid:
             return
-
         self._init_cs_slider_from_reader(mid)
 
     def _on_reader_failed(self, sid: int, msg: str) -> None:
-        """Called when a SliceReaderWorker fails to open."""
-        self._reader_workers.pop(sid, None)
-        logger.warning(f"RemoteSliceReader failed for z{sid:02d}: {msg}")
+        """Called when a remote reader fails to open."""
         self._cs_loading_label.setText(f"<span style='color:red;'>Reader failed for z{sid:02d}</span>")
 
-    def _request_cross_section(self, sid: int, axis: str, pos: int) -> None:
-        """Fetch one cross-section image, using cache if available."""
-        cached = self._cs_cache.get(sid, {}).get(axis, {}).get(pos)
-        if cached is not None:
-            self._refresh_cross_section()
-            return
-        reader = self._readers.get(sid)
-        if reader is None:
-            return
-        worker = CrossSectionWorker(reader, axis, pos)
-        worker.finished.connect(self._on_cross_section_ready)
-        worker.failed.connect(self._on_cross_section_failed)
-        self._cs_workers.append(worker)
-        worker.finished.connect(lambda *_: self._cs_workers.remove(worker) if worker in self._cs_workers else None)
-        worker.start()
-
     def _on_cross_section_ready(self, sid: int, axis: str, pos: int, img: object) -> None:
-        """Cache the fetched cross-section and refresh the display if it matches the current view."""
-        img_arr = np.asarray(img)
-        self._cs_cache.setdefault(sid, {}).setdefault(axis, {})[pos] = img_arr
-
+        """Refresh display when a cross-section image arrives in the manager cache."""
         if not self.pairs:
             return
         fid, mid = self.pairs[self.current_pair_idx]
@@ -1312,11 +1017,11 @@ class ManualAlignWidget(QWidget):
         fetch the moving slice at a different column:
           XZ view (Y slider):  moving_y = fixed_y - ty * scale
           YZ view (X slider):  moving_x = fixed_x - tx * scale
-        where scale = 2 ** (self.level - self._cs_level) converts from working-res pixels to
+        where scale = 2 ** (self.level - cs_level) converts from working-res pixels to
         cross-section-level pixels.
         """
         state = self._current_state()
-        scale = 2 ** (self.level - self._cs_level)
+        scale = 2 ** (self.level - self._cs_mgr.cs_level)
         if axis == "xz":
             return -round(state.ty * scale)
         return -round(state.tx * scale)
@@ -1331,7 +1036,7 @@ class ManualAlignWidget(QWidget):
         _fid, mid = self.pairs[self.current_pair_idx]
         axis = self._projection_mode
         pos = self._cross_section_y if axis == "xz" else self._cross_section_x
-        img = self._cs_cache.get(mid, {}).get(axis, {}).get(pos)
+        img = self._cs_mgr.get_cached(mid, axis, pos)
         if img is not None and self.moving_layer is not None:
             self.moving_layer.data = normalize_aip(img.astype(np.float32))
 
@@ -1342,36 +1047,8 @@ class ManualAlignWidget(QWidget):
         _fid, mid = self.pairs[self.current_pair_idx]
         axis = self._projection_mode
         pos = self._cross_section_y if axis == "xz" else self._cross_section_x
-        self._request_cross_section(mid, axis, pos)
-        self._prefetch_around(mid, axis, pos)
-
-    def _prefetch_around(self, sid: int, axis: str, pos: int) -> None:
-        """Pre-fetch cross-sections at ±5 steps around *pos* for *sid*.
-
-        Steps: ±10, ±20, ±30, ±40, ±50 pixels from current position.
-        Also evicts entries for positions outside [pos-15*10, pos+15*10] to keep
-        the local in-memory cache bounded to ~30 images per slice per axis.
-        """
-        reader = self._readers.get(sid)
-        if reader is None:
-            return
-
-        max_pos = reader.shape[2] if axis == "yz" else reader.shape[1]
-        step = 10
-        prefetch_offsets = [step * i for i in range(1, 6)]  # 10, 20, 30, 40, 50
-
-        for offset in prefetch_offsets:
-            for candidate in (pos + offset, pos - offset):
-                if 0 <= candidate < max_pos and self._cs_cache.get(sid, {}).get(axis, {}).get(candidate) is None:
-                    self._request_cross_section(sid, axis, candidate)
-
-        # Evict positions outside ±15 steps (±150 px)
-        evict_radius = 15 * step
-        axis_cache = self._cs_cache.get(sid, {}).get(axis, {})
-        if axis_cache:
-            for cached_pos in list(axis_cache.keys()):
-                if abs(cached_pos - pos) > evict_radius:
-                    del axis_cache[cached_pos]
+        self._cs_mgr.request(mid, axis, pos)
+        self._cs_mgr.prefetch_around(mid, axis, pos)
 
     def _nudge_cs_position(self, delta: int) -> None:
         """Shift the active cross-section slider by *delta* pixels."""
@@ -1548,7 +1225,7 @@ class ManualAlignWidget(QWidget):
                 pkg_aips = local_dir / "aips"
             if pkg_aips.exists():
                 self.aips_dir = pkg_aips
-                self.slice_paths = self._discover_aips(pkg_aips)
+                self.slice_paths = discover_aips(pkg_aips)
                 self.slice_ids = list(self.slice_paths.keys())
 
                 # Discover axis-specific AIPs
@@ -1648,12 +1325,12 @@ class ManualAlignWidget(QWidget):
         if mid in self.existing_transforms:
             metrics_path = self.existing_transforms[mid] / "pairwise_registration_metrics.json"
             metrics = load_pairwise_metrics(metrics_path)
-            auto_tx = self._get_metric(metrics, "translation_x")
-            auto_ty = self._get_metric(metrics, "translation_y")
-            auto_rot = self._get_metric(metrics, "rotation")
-            auto_mag = self._get_metric(metrics, "translation_magnitude")
-            auto_conf = self._get_metric(metrics, "registration_confidence")
-            auto_zcorr = self._get_metric(metrics, "z_correlation")
+            auto_tx = get_metric(metrics, "translation_x")
+            auto_ty = get_metric(metrics, "translation_y")
+            auto_rot = get_metric(metrics, "rotation")
+            auto_mag = get_metric(metrics, "translation_magnitude")
+            auto_conf = get_metric(metrics, "registration_confidence")
+            auto_zcorr = get_metric(metrics, "z_correlation")
 
             auto_parts = []
             if auto_tx is not None:
@@ -1679,13 +1356,6 @@ class ManualAlignWidget(QWidget):
             lines.append("<b style='color: green;'>✓ SAVED</b>")
 
         self.status_label.setText("<br>".join(lines))
-
-    @staticmethod
-    def _get_metric(metrics: dict, key: str) -> float | None:
-        try:
-            return float(metrics["metrics"][key]["value"])
-        except (KeyError, TypeError, ValueError):
-            return None
 
     # ----- Keybindings -----
 
@@ -1843,19 +1513,7 @@ class ManualAlignWidget(QWidget):
 
     def closeEvent(self, event: object) -> None:
         """Terminate all persistent SSH readers on widget close."""
-        for reader in list(self._readers.values()):
-            reader.close()
-        self._readers.clear()
-        for w in list(self._reader_workers.values()):
-            with contextlib.suppress(Exception):
-                w.quit()
-                w.wait(2000)
-        self._reader_workers.clear()
-        for w in list(self._cs_workers):
-            with contextlib.suppress(Exception):
-                w.quit()
-                w.wait(2000)
-        self._cs_workers.clear()
+        self._cs_mgr.close_all()
         super().closeEvent(event)  # type: ignore[arg-type]
 
     # ----- Close guard -----
@@ -1960,7 +1618,7 @@ class ManualAlignWidget(QWidget):
     def _load_existing_package(self, aips_dir: Path) -> None:
         """Load a previously downloaded package without hitting the server."""
         self.aips_dir = aips_dir
-        self.slice_paths = self._discover_aips(aips_dir)
+        self.slice_paths = discover_aips(aips_dir)
         self.slice_ids = list(self.slice_paths.keys())
 
         # Discover axis-specific AIPs
@@ -1980,26 +1638,8 @@ class ManualAlignWidget(QWidget):
         self._rebuild_pairs()
 
     def _load_remote_cs_metadata(self, pkg_root: Path) -> None:
-        """Read slices_remote_dir and cross_section_level from package metadata."""
-        import json
-
-        for candidate in (
-            pkg_root / "manual_align_metadata.json",
-            pkg_root.parent / "manual_align_metadata.json",
-        ):
-            if candidate.exists():
-                try:
-                    meta = json.loads(candidate.read_text())
-                    self._slices_remote_dir = meta.get("slices_remote_dir")
-                    self._cs_level = int(meta.get("cross_section_level", meta.get("pyramid_level", 0)))
-                    self._slice_filenames = {int(k): v for k, v in meta.get("slice_filenames", {}).items()}
-                    if self._slices_remote_dir:
-                        logger.info(
-                            f"Interactive XZ/YZ enabled: remote zarr at {self._slices_remote_dir} level {self._cs_level}"
-                        )
-                except Exception as exc:
-                    logger.warning(f"Could not read package metadata: {exc}")
-                break
+        """Delegate metadata loading to the CrossSectionManager."""
+        self._cs_mgr.load_metadata(pkg_root)
 
     def _on_host_changed(self, text: str) -> None:
         """Update server config host when the user edits the host field."""

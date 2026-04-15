@@ -3,15 +3,22 @@
 Loads and saves SimpleITK Euler3DTransform .tfm files and companion
 pairwise_registration_metrics.json files, compatible with the linumpy
 stacking pipeline (linum_stack_slices_motor.py).
+
+Also provides AIP discovery and loading helpers shared between the widget
+and the CLI (discover_aips, discover_pair_aips, load_aip_from_npz).
 """
 
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import numpy as np
 import SimpleITK as sitk
+
+# Shared regex for matching slice_z##  directory / file names.
+_SLICE_PATTERN = re.compile(r"slice_z(\d+)")
 
 
 def adjust_for_rotation_center(
@@ -214,12 +221,9 @@ def discover_slices(input_dir: Path) -> dict[int, Path]:
     dict[int, Path]
         Ordered mapping from slice ID to path.
     """
-    import re
-
-    pattern = re.compile(r"slice_z(\d+)")
     slices = {}
     for p in sorted(input_dir.iterdir()):
-        m = pattern.search(p.name)
+        m = _SLICE_PATTERN.search(p.name)
         if m and p.name.endswith(".ome.zarr"):
             slices[int(m.group(1))] = p
     return dict(sorted(slices.items()))
@@ -238,15 +242,98 @@ def discover_transforms(transforms_dir: Path) -> dict[int, Path]:
     dict[int, Path]
         Mapping from slice ID to transform directory.
     """
-    import re
-
-    pattern = re.compile(r"slice_z(\d+)")
     transforms = {}
     for p in sorted(transforms_dir.iterdir()):
         if p.is_dir():
-            m = pattern.search(p.name)
+            m = _SLICE_PATTERN.search(p.name)
             if m:
                 tfm_files = list(p.glob("*.tfm"))
                 if tfm_files:
                     transforms[int(m.group(1))] = p
     return dict(sorted(transforms.items()))
+
+
+def discover_aips(aips_dir: Path) -> dict[int, Path]:
+    """Discover pre-computed AIP .npz files in *aips_dir*.
+
+    Parameters
+    ----------
+    aips_dir : Path
+        Directory containing ``slice_z##.npz`` files.
+
+    Returns
+    -------
+    dict[int, Path]
+        Ordered mapping from slice ID to .npz path.
+    """
+    aips: dict[int, Path] = {}
+    for p in sorted(aips_dir.iterdir()):
+        m = _SLICE_PATTERN.search(p.name)
+        if m and p.name.endswith(".npz"):
+            aips[int(m.group(1))] = p
+    return dict(sorted(aips.items()))
+
+
+def discover_pair_aips(aips_dir: Path) -> dict[tuple[int, int], dict[str, Path]]:
+    """Discover paired XZ/YZ NPZ files (``pair_z{fid:02d}_z{mid:02d}_{role}.npz``).
+
+    Parameters
+    ----------
+    aips_dir : Path
+        Directory containing paired ``pair_z##_z##_fixed.npz`` / ``…_moving.npz`` files.
+
+    Returns
+    -------
+    dict[tuple[int, int], dict[str, Path]]
+        ``{(fid, mid): {"fixed": Path, "moving": Path}}``.
+    """
+    pair_pattern = re.compile(r"pair_z(\d+)_z(\d+)_(fixed|moving)\.npz$")
+    result: dict[tuple[int, int], dict[str, Path]] = {}
+    for p in sorted(aips_dir.iterdir()):
+        m = pair_pattern.match(p.name)
+        if m:
+            key = (int(m.group(1)), int(m.group(2)))
+            result.setdefault(key, {})[m.group(3)] = p
+    return result
+
+
+def load_aip_from_npz(npz_path: Path) -> tuple[np.ndarray, list[float]]:
+    """Load a pre-computed AIP from an .npz file.
+
+    Parameters
+    ----------
+    npz_path : Path
+        Path to an .npz file containing ``aip`` and ``scale`` arrays.
+
+    Returns
+    -------
+    tuple[np.ndarray, list[float]]
+        ``(aip, scale_yx)`` where *aip* is float32 and *scale_yx* is a
+        two-element list ``[sy, sx]``.
+    """
+    data = np.load(str(npz_path))
+    aip = data["aip"].astype(np.float32)
+    scale = data["scale"]
+    scale_yx = list(scale[1:]) if len(scale) == 3 else list(scale)
+    return aip, [float(v) for v in scale_yx]
+
+
+def get_metric(metrics: dict, key: str) -> float | None:
+    """Extract a scalar value from a pairwise-registration metrics dict.
+
+    Parameters
+    ----------
+    metrics : dict
+        Dict as returned by :func:`load_pairwise_metrics`.
+    key : str
+        Key inside ``metrics["metrics"]``, e.g. ``"translation_magnitude"``.
+
+    Returns
+    -------
+    float or None
+        The ``"value"`` field, or *None* if the key is absent or malformed.
+    """
+    try:
+        return float(metrics["metrics"][key]["value"])
+    except (KeyError, TypeError, ValueError):
+        return None

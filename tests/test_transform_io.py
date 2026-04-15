@@ -5,9 +5,16 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import numpy as np
+import pytest
+
 from linumpy_manual_align.transform_io import (
+    discover_aips,
+    discover_pair_aips,
     discover_slices,
     discover_transforms,
+    get_metric,
+    load_aip_from_npz,
     load_offsets,
     load_pairwise_metrics,
     load_transform,
@@ -142,8 +149,6 @@ class TestLoadOffsets:
         assert result == (0, 0)
 
     def test_valid_offsets(self, tmp_path: Path) -> None:
-        import numpy as np
-
         offsets_path = tmp_path / "offsets.txt"
         np.savetxt(str(offsets_path), [5, 12], fmt="%d")
         result = load_offsets(offsets_path)
@@ -155,3 +160,136 @@ class TestLoadOffsets:
         save_transform(out_dir, tx=1.0, ty=2.0, rotation_deg=0.0, center=(50.0, 50.0), level=0, offsets=(3, 7))
         result = load_offsets(out_dir / "offsets.txt")
         assert result == (3, 7)
+
+
+# ---------------------------------------------------------------------------
+# discover_aips
+# ---------------------------------------------------------------------------
+
+
+class TestDiscoverAips:
+    def test_discovers_npz_files(self, tmp_path: Path) -> None:
+        for i in [0, 3, 7]:
+            (tmp_path / f"slice_z{i:02d}.npz").touch()
+        # Files that don't match the pattern should be ignored.
+        (tmp_path / "other.npz").touch()
+        (tmp_path / "slice_z00.ome.zarr").mkdir()
+
+        aips = discover_aips(tmp_path)
+        assert list(aips.keys()) == [0, 3, 7]
+
+    def test_returns_correct_paths(self, tmp_path: Path) -> None:
+        p = tmp_path / "slice_z05.npz"
+        p.touch()
+        aips = discover_aips(tmp_path)
+        assert aips[5] == p
+
+    def test_empty_directory(self, tmp_path: Path) -> None:
+        assert discover_aips(tmp_path) == {}
+
+    def test_sorted_order(self, tmp_path: Path) -> None:
+        for i in [10, 2, 7]:
+            (tmp_path / f"slice_z{i:02d}.npz").touch()
+        aips = discover_aips(tmp_path)
+        assert list(aips.keys()) == [2, 7, 10]
+
+
+# ---------------------------------------------------------------------------
+# discover_pair_aips
+# ---------------------------------------------------------------------------
+
+
+class TestDiscoverPairAips:
+    def test_discovers_paired_files(self, tmp_path: Path) -> None:
+        (tmp_path / "pair_z00_z01_fixed.npz").touch()
+        (tmp_path / "pair_z00_z01_moving.npz").touch()
+        result = discover_pair_aips(tmp_path)
+        assert (0, 1) in result
+        assert "fixed" in result[(0, 1)]
+        assert "moving" in result[(0, 1)]
+
+    def test_ignores_non_pair_files(self, tmp_path: Path) -> None:
+        (tmp_path / "slice_z00.npz").touch()
+        (tmp_path / "pair_z00_z01_fixed.npz").touch()
+        result = discover_pair_aips(tmp_path)
+        assert (0, 1) in result
+        assert len(result) == 1
+
+    def test_multiple_pairs(self, tmp_path: Path) -> None:
+        for fid, mid in [(0, 1), (1, 2), (5, 6)]:
+            for role in ("fixed", "moving"):
+                (tmp_path / f"pair_z{fid:02d}_z{mid:02d}_{role}.npz").touch()
+        result = discover_pair_aips(tmp_path)
+        assert len(result) == 3
+
+    def test_empty_directory(self, tmp_path: Path) -> None:
+        assert discover_pair_aips(tmp_path) == {}
+
+
+# ---------------------------------------------------------------------------
+# load_aip_from_npz
+# ---------------------------------------------------------------------------
+
+
+class TestLoadAipFromNpz:
+    def _write_npz(self, path: Path, aip: np.ndarray, scale: np.ndarray) -> None:
+        np.savez(str(path), aip=aip, scale=scale)
+
+    def test_basic_load_yx_scale(self, tmp_path: Path) -> None:
+        aip = np.ones((32, 32), dtype=np.float32)
+        scale = np.array([1.0, 0.5])
+        p = tmp_path / "slice_z00.npz"
+        self._write_npz(p, aip, scale)
+        loaded_aip, loaded_scale = load_aip_from_npz(p)
+        assert loaded_aip.shape == (32, 32)
+        assert loaded_aip.dtype == np.float32
+        assert loaded_scale == [1.0, 0.5]
+
+    def test_3d_scale_drops_z(self, tmp_path: Path) -> None:
+        """When scale has 3 elements (Z, Y, X), Z is dropped."""
+        aip = np.zeros((16, 16), dtype=np.uint16)
+        scale = np.array([3.0, 1.5, 1.5])
+        p = tmp_path / "slice_z01.npz"
+        self._write_npz(p, aip, scale)
+        _, loaded_scale = load_aip_from_npz(p)
+        assert len(loaded_scale) == 2
+        assert loaded_scale == [1.5, 1.5]
+
+    def test_output_dtype_is_float32(self, tmp_path: Path) -> None:
+        aip = np.ones((8, 8), dtype=np.uint8)
+        p = tmp_path / "slice_z02.npz"
+        self._write_npz(p, aip, np.array([1.0, 1.0]))
+        loaded_aip, _ = load_aip_from_npz(p)
+        assert loaded_aip.dtype == np.float32
+
+
+# ---------------------------------------------------------------------------
+# get_metric
+# ---------------------------------------------------------------------------
+
+
+class TestGetMetric:
+    def test_returns_float_for_valid_key(self) -> None:
+        metrics = {"metrics": {"translation_magnitude": {"value": 42.7}}}
+        assert get_metric(metrics, "translation_magnitude") == pytest.approx(42.7)
+
+    def test_returns_none_for_missing_key(self) -> None:
+        metrics = {"metrics": {}}
+        assert get_metric(metrics, "nonexistent") is None
+
+    def test_returns_none_for_empty_dict(self) -> None:
+        assert get_metric({}, "any_key") is None
+
+    def test_returns_none_for_non_numeric_value(self) -> None:
+        metrics = {"metrics": {"bad": {"value": "not_a_number"}}}
+        assert get_metric(metrics, "bad") is None
+
+    def test_returns_none_when_value_key_missing(self) -> None:
+        metrics = {"metrics": {"tx": {"other_field": 5.0}}}
+        assert get_metric(metrics, "tx") is None
+
+    def test_handles_integer_value(self) -> None:
+        metrics = {"metrics": {"rotation": {"value": 3}}}
+        val = get_metric(metrics, "rotation")
+        assert val == pytest.approx(3.0)
+        assert isinstance(val, float)

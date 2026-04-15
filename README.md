@@ -100,21 +100,53 @@ Overlay and enhancement modes are independent and can be combined freely.
 
 | Key | Action |
 |-----|--------|
-| Arrow keys | Nudge translation ±1 px (Shift: ±10 px) |
-| `[` / `]` | Rotate ±0.1° (Alt: ±1.0°, Ctrl: ±5.0°) |
+| Arrow keys | Nudge translation ±1 px |
+| Alt + Arrow | Nudge translation ±10 px |
+| Ctrl + Arrow | Nudge translation ±50 px |
+| `[` / `]` | Rotate ±0.1° |
+| Alt + `[` / `]` | Rotate ±1.0° |
+| Ctrl + `[` / `]` | Rotate ±5.0° |
 | `N` / `P` | Next / previous slice pair |
+| `M` | Toggle XY / Z Alignment mode |
+| `V` | Toggle XZ / YZ projection (Z mode) |
 | `S` | Save current pair |
 | Ctrl+Z / Ctrl+Shift+Z | Undo / Redo |
+
+## Architecture
+
+The package is split into focused modules to keep each one small and testable:
+
+| Module | Responsibility |
+|--------|---------------|
+| `widget.py` | Main napari dock widget — coordinates all modules |
+| `ui_builder.py` | Qt widget construction helpers (returns named-widget namespaces) |
+| `cross_section.py` | `CrossSectionManager`: remote OME-Zarr reader lifecycle, cross-section cache, prefetch |
+| `image_utils.py` | Pure image processing: normalize, enhance, overlay compositing, transform application |
+| `transform_io.py` | SimpleITK `.tfm` save/load, AIP/pair-AIP discovery, pairwise metrics I/O |
+| `server_transfer.py` | SCP/SSH download/upload workers, remote slice reader |
+| `omezarr_io.py` | Optional: load AIP directly from an OME-Zarr pyramid |
+| `state.py` | `AlignmentState` dataclass, bounded `UndoStack` |
 
 ## Development
 
 ```bash
-# Lint and format
-uv run ruff check src/ && uv run ruff format --check src/
+# Clone and install in editable mode (uv manages the venv)
+git clone https://github.com/linum-uqam/linumpy-manual-align.git
+cd linumpy-manual-align
+uv sync
+uv pip install -e ".[dev]"
 
-# Type check
+# Lint and format
+uv run ruff check src/ tests/ && uv run ruff format --check src/ tests/
+
+# Type check (library only)
 uv run ty check src/
 
-# Run tests
+# Run all tests
 uv run pytest tests/ -v
+
+# Run a specific test module
+uv run pytest tests/test_image_utils.py -v
+uv run pytest tests/test_transform_io.py -v
+uv run pytest tests/test_cross_section.py -v
 ```
