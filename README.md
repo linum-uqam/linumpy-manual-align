@@ -101,7 +101,7 @@ Overlay and enhancement modes are independent and can be combined freely.
 | Key | Action |
 |-----|--------|
 | Arrow keys | Nudge translation ±1 px (Shift: ±10 px) |
-| `[` / `]` | Rotate ±0.1° (Shift: ±1.0°, Ctrl: ±5.0°) |
+| `[` / `]` | Rotate ±0.1° (Alt: ±1.0°, Ctrl: ±5.0°) |
 | `N` / `P` | Next / previous slice pair |
 | `S` | Save current pair |
 | Ctrl+Z / Ctrl+Shift+Z | Undo / Redo |

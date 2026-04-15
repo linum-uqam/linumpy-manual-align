@@ -22,6 +22,29 @@ ENHANCE_CLAHE = "clahe"
 ENHANCE_SHARPEN = "sharpen"
 
 
+def content_bbox(
+    img: np.ndarray,
+    threshold: float = 0.02,
+    padding: int = 20,
+) -> tuple[int, int, int, int]:
+    """Return ``(r1, c1, r2, c2)`` tight bounding box of non-zero content.
+
+    A uniform padding of *padding* pixels is added on every side (clamped to
+    the image boundaries).  Returns the full image extent when no content is
+    detected.
+    """
+    mask = img > threshold
+    rows = np.any(mask, axis=1)
+    cols = np.any(mask, axis=0)
+    if not rows.any() or not cols.any():
+        return 0, 0, img.shape[0], img.shape[1]
+    r1 = max(0, int(np.where(rows)[0][0]) - padding)
+    r2 = min(img.shape[0], int(np.where(rows)[0][-1]) + padding + 1)
+    c1 = max(0, int(np.where(cols)[0][0]) - padding)
+    c2 = min(img.shape[1], int(np.where(cols)[0][-1]) + padding + 1)
+    return r1, c1, r2, c2
+
+
 def normalize_aip(img: np.ndarray) -> np.ndarray:
     """Stretch *img* to [0, 1] using the 1st / 99th percentile of non-zero values.
 
@@ -90,64 +113,6 @@ def enhance_aip(img: np.ndarray, mode: str) -> np.ndarray:
     return img
 
 
-def build_moving_affine(
-    rotation_deg: float,
-    tx: float,
-    ty: float,
-    scale_yx: tuple[float, float] | list[float],
-    shape_hw: tuple[int, int],
-) -> np.ndarray:
-    """Build the complete 3x3 data→world affine for the moving napari layer.
-
-    Encodes: scale → rotate CCW by *rotation_deg* about the image centre →
-    translate by *(ty, tx)* pixels.  Setting this matrix on ``layer.affine``
-    means no pixel resampling is ever required; napari renders the transform
-    natively in hardware.
-
-    Parameters
-    ----------
-    rotation_deg:
-        Counter-clockwise rotation in degrees.
-    tx, ty:
-        Translation in pixels at the current pyramid level
-        (positive tx = rightward, positive ty = downward).
-    scale_yx:
-        Physical pixel spacing ``(scale_y, scale_x)`` at the working level.
-    shape_hw:
-        Image shape ``(H, W)`` at the working level.
-
-    Returns
-    -------
-    np.ndarray
-        3x3 homogeneous affine matrix (data coords → world coords).
-    """
-    sy, sx = float(scale_yx[0]), float(scale_yx[1])
-    H, W = shape_hw
-
-    # Rotation centre = image centre in world space (at zero translation)
-    cy_w = H / 2.0 * sy
-    cx_w = W / 2.0 * sx
-
-    theta = np.radians(rotation_deg)
-    cos_t = np.cos(theta)
-    sin_t = np.sin(theta)
-
-    # World-space translation
-    ty_w = ty * sy
-    tx_w = tx * sx
-
-    # Full data→world transform:
-    #   world_row = cos*r*sy  - sin*c*sx  + (1-cos)*cy_w + sin*cx_w + ty_w
-    #   world_col = sin*r*sy  + cos*c*sx  - sin*cy_w + (1-cos)*cx_w + tx_w
-    return np.array(
-        [
-            [cos_t * sy, -sin_t * sx, (1.0 - cos_t) * cy_w + sin_t * cx_w + ty_w],
-            [sin_t * sy, cos_t * sx, -sin_t * cy_w + (1.0 - cos_t) * cx_w + tx_w],
-            [0.0, 0.0, 1.0],
-        ]
-    )
-
-
 def apply_transform(
     moving: np.ndarray,
     *,
@@ -158,8 +123,7 @@ def apply_transform(
     """Return *moving* with rotation and translation baked into pixel data.
 
     Used exclusively for the composite overlay modes (Difference, Checkerboard)
-    where a single combined image must be computed.  For the direct-layer
-    display path, use ``build_moving_affine`` instead — no pixel resampling.
+    where a single combined image must be computed.
 
     Rotation is performed about pixel ``(H/2 - ty, W/2 - tx)`` so the
     world-space pivot stays at the image centre after the ``(ty, tx)``
@@ -185,8 +149,10 @@ def apply_transform(
         cos_a, sin_a = np.cos(angle_rad), np.sin(angle_rad)
         # affine_transform maps output→input; use R(-rotation) for CCW display rotation.
         m = np.array([[cos_a, sin_a], [-sin_a, cos_a]])
-        cy = moving.shape[0] / 2.0 - ty
-        cx = moving.shape[1] / 2.0 - tx
+        # Always rotate about the image centre (H/2, W/2) regardless of tx/ty.
+        # The shift step below then moves the brain to its translated position.
+        cy = moving.shape[0] / 2.0
+        cx = moving.shape[1] / 2.0
         c = np.array([cy, cx])
         out = affine_transform(out, m, offset=c - m @ c, mode="constant", cval=0, order=1).astype(np.float32)
     if abs(tx) > 1e-6 or abs(ty) > 1e-6:
