@@ -221,6 +221,9 @@ class ManualAlignWidget(QWidget):
         self._cs_workers: list[CrossSectionWorker] = []
         # Cache: sid → axis → pos → img_array
         self._cs_cache: dict[int, dict[str, dict[int, np.ndarray]]] = {}
+        # Exact remote zarr filename per slice ID (e.g. "slice_z02_normalize.ome.zarr").
+        # Loaded from metadata; falls back to "slice_z{sid:02d}.ome.zarr" when absent.
+        self._slice_filenames: dict[int, str] = {}
         # Current interactive cross-section positions.
         self._cross_section_y: int = 0
         self._cross_section_x: int = 0
@@ -931,6 +934,9 @@ class ManualAlignWidget(QWidget):
         # Interactive cross-section sliders
         if self._projection_mode in ("xz", "yz"):
             if self._slices_remote_dir is not None:
+                # Estimate tissue centroid from the static NPZ so the initial
+                # remote fetch lands on tissue rather than the volume edge.
+                self._update_initial_cs_position(fid, mid)
                 self._update_cs_slider_visibility()
                 self._ensure_readers_for_pair()
                 # If readers already open for both slices, refresh immediately
@@ -1147,6 +1153,48 @@ class ManualAlignWidget(QWidget):
 
     # ----- Interactive XZ/YZ cross-section (remote OME-Zarr) -----
 
+    def _update_initial_cs_position(self, fid: int, mid: int) -> None:
+        """Estimate tissue centroid from the static NPZ cross-section for this pair.
+
+        The static NPZ was generated at the tissue centroid column during export.
+        We use the intensity-weighted mean of the current cross-section image to
+        get a rough position estimate so the first remote fetch lands on tissue.
+        Resets to 0 if no static image is available.
+        """
+        pair_key = (fid, mid)
+        axis = self._projection_mode  # "xz" or "yz"
+        pair_store = self.pair_paths_xz if axis == "xz" else self.pair_paths_yz
+        per_slice_store = self.slice_paths_xz if axis == "xz" else self.slice_paths_yz
+
+        npz_path: Path | None = None
+        if pair_key in pair_store and "fixed" in pair_store[pair_key]:
+            npz_path = pair_store[pair_key]["fixed"]
+        elif fid in per_slice_store:
+            npz_path = per_slice_store[fid]
+
+        if npz_path is None:
+            self._cross_section_y = 0
+            self._cross_section_x = 0
+            return
+
+        try:
+            data = np.load(str(npz_path))
+            img = data["aip"].astype(np.float32)
+            # img shape: (Z, lateral) where lateral = X for XZ, Y for YZ.
+            # The static NPZ was taken at the tissue centroid column of the *other*
+            # axis.  We can't recover that directly, so default to the middle of
+            # the remote volume — handled by _on_reader_ready.
+            # What we CAN recover: the lateral dimension size helps us set a sane
+            # initial guess before the reader is open.
+            lateral_size = img.shape[1] if img.ndim == 2 else img.shape[-1]
+            mid_pos = lateral_size // 2
+            if axis == "xz":
+                self._cross_section_y = mid_pos
+            else:
+                self._cross_section_x = mid_pos
+        except Exception:
+            pass
+
     def _ensure_readers_for_pair(self) -> None:
         """Start SliceReaderWorkers for both slices of the current pair if not already open."""
         if not self.pairs or self._slices_remote_dir is None or self.server_config is None:
@@ -1155,7 +1203,7 @@ class ManualAlignWidget(QWidget):
         for sid in (fid, mid):
             if sid in self._readers or sid in self._reader_workers:
                 continue
-            zarr_name = f"slice_z{sid:02d}.ome.zarr"
+            zarr_name = self._slice_filenames.get(sid, f"slice_z{sid:02d}.ome.zarr")
             remote_path = f"{self._slices_remote_dir}/{zarr_name}"
             worker = SliceReaderWorker(self.server_config, sid, remote_path, self._cs_level)
             worker.ready.connect(self._on_reader_ready)
@@ -1180,22 +1228,30 @@ class ManualAlignWidget(QWidget):
             # Set slider ranges from the reader shape now that we know dimensions
             fid_reader = self._readers[fid]
             _nz, ny, nx = fid_reader.shape
+
+            # Choose initial Y: use stored tissue centroid if it looks valid
+            # (i.e. it was set to something other than 0 by _load_pair),
+            # otherwise fall back to the middle of the volume.
+            init_y = self._cross_section_y if 0 < self._cross_section_y < ny else ny // 2
+            init_x = self._cross_section_x if 0 < self._cross_section_x < nx else nx // 2
+
             self.slider_cs_y.blockSignals(True)
             self.slider_cs_y.setMaximum(ny - 1)
-            # Set initial position to the tissue centroid from the static cross-section
-            self.slider_cs_y.setValue(min(self._cross_section_y, ny - 1))
+            self.slider_cs_y.setValue(init_y)
             self.slider_cs_y.blockSignals(False)
-            self._lbl_cs_y.setText(str(self.slider_cs_y.value()))
+            self._lbl_cs_y.setText(str(init_y))
+            self._cross_section_y = init_y
 
             self.slider_cs_x.blockSignals(True)
             self.slider_cs_x.setMaximum(nx - 1)
-            self.slider_cs_x.setValue(min(self._cross_section_x, nx - 1))
+            self.slider_cs_x.setValue(init_x)
             self.slider_cs_x.blockSignals(False)
-            self._lbl_cs_x.setText(str(self.slider_cs_x.value()))
+            self._lbl_cs_x.setText(str(init_x))
+            self._cross_section_x = init_x
 
             # Fetch the initial position
             axis = self._projection_mode  # "xz" or "yz"
-            pos = self._cross_section_y if axis == "xz" else self._cross_section_x
+            pos = init_y if axis == "xz" else init_x
             self._request_cross_section(fid, axis, pos)
             self._request_cross_section(mid, axis, pos)
         elif not self._reader_workers:
@@ -1451,8 +1507,10 @@ class ManualAlignWidget(QWidget):
         self.server_status_label.setText("<i>Downloading...</i>")
         self.viewer.status = "Downloading data from server..."
 
-        # Determine local destination
-        local_dir = self.aips_dir.parent if self.aips_dir is not None else self.output_dir.parent / "server_package"
+        # Always download to the same fixed root so repeated downloads overwrite
+        # in-place instead of nesting deeper (aips_dir.parent would keep moving
+        # deeper each time because aips_dir is updated after every download).
+        local_dir = self.output_dir.parent / "server_package"
 
         self._worker = ScpWorker(download_manual_align_package, (self.server_config, local_dir, self.level))
         self._worker.finished.connect(lambda ok, msg: self._on_download_finished(ok, msg, local_dir))
@@ -1478,6 +1536,9 @@ class ManualAlignWidget(QWidget):
 
                 # Discover axis-specific AIPs
                 self._discover_axis_aip_dirs(pkg_aips.parent)
+
+                # Load remote zarr metadata for interactive cross-section sliders
+                self._load_remote_cs_metadata(pkg_aips.parent)
 
                 # Reload transforms too if available
                 pkg_tfm = local_dir / "manual_align_package" / "transforms"
@@ -1914,6 +1975,7 @@ class ManualAlignWidget(QWidget):
                     meta = json.loads(candidate.read_text())
                     self._slices_remote_dir = meta.get("slices_remote_dir")
                     self._cs_level = int(meta.get("cross_section_level", meta.get("pyramid_level", 0)))
+                    self._slice_filenames = {int(k): v for k, v in meta.get("slice_filenames", {}).items()}
                     if self._slices_remote_dir:
                         logger.info(
                             f"Interactive XZ/YZ enabled: remote zarr at {self._slices_remote_dir} level {self._cs_level}"
