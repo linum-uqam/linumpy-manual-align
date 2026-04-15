@@ -40,4 +40,6 @@ jobs:
       - name: Install dependencies
         run: sudo apt update && sudo apt install -y libegl1-mesa-dev
       - name: Run tests
+        env:
+          QT_QPA_PLATFORM: offscreen
         run: uv run --extra dev pytest tests/ -v
