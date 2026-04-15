@@ -804,7 +804,7 @@ class ManualAlignWidget(QWidget):
             _fixed_npz = _moving_npz = None
             _use_paired = False
 
-        if self._projection_mode in ("xz", "yz") and _fixed_npz is not None:
+        if self._projection_mode in ("xz", "yz") and _fixed_npz is not None and _moving_npz is not None:
             fixed_aip, fixed_scale_yx = self._load_aip_from_npz(_fixed_npz)
             moving_aip, moving_scale_yx = self._load_aip_from_npz(_moving_npz)
         elif self._use_precomputed_aips:
