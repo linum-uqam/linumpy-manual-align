@@ -26,8 +26,9 @@ from pathlib import Path
 
 import napari
 import numpy as np
-from qtpy.QtCore import Qt
+from qtpy.QtCore import Qt, QTimer
 from qtpy.QtWidgets import (
+    QButtonGroup,
     QComboBox,
     QDoubleSpinBox,
     QFileDialog,
@@ -91,17 +92,17 @@ _KEYBINDINGS: list[tuple[str, str, tuple]] = [
     ("n", "_next_pair", ()),
     ("p", "_prev_pair", ()),
     ("s", "_save_current", ()),
-    # Fine translation (1 px)
+    # Fine translation (1 px) / Z fine nudge (1 voxel) — mode-aware
     ("Right", "_nudge_translate", (1, 0)),
     ("Left", "_nudge_translate", (-1, 0)),
     ("Up", "_nudge_translate", (0, -1)),
     ("Down", "_nudge_translate", (0, 1)),
-    # Coarse translation (10 px)
-    ("Shift-Right", "_nudge_translate", (10, 0)),
-    ("Shift-Left", "_nudge_translate", (-10, 0)),
-    ("Shift-Up", "_nudge_translate", (0, -10)),
-    ("Shift-Down", "_nudge_translate", (0, 10)),
-    # Large translation (50 px)
+    # Coarse translation (10 px) / Z coarse nudge (10 voxels) — mode-aware
+    ("Alt-Right", "_nudge_translate", (10, 0)),
+    ("Alt-Left", "_nudge_translate", (-10, 0)),
+    ("Alt-Up", "_nudge_translate", (0, -10)),
+    ("Alt-Down", "_nudge_translate", (0, 10)),
+    # Large translation (50 px) — XY only
     ("Control-Right", "_nudge_translate", (50, 0)),
     ("Control-Left", "_nudge_translate", (-50, 0)),
     ("Control-Up", "_nudge_translate", (0, -50)),
@@ -113,6 +114,10 @@ _KEYBINDINGS: list[tuple[str, str, tuple]] = [
     ("Alt-[", "_nudge_rotate", (-1.0,)),
     ("Control-]", "_nudge_rotate", (5.0,)),
     ("Control-[", "_nudge_rotate", (-5.0,)),
+    # Z alignment: switch XZ ↔ YZ view
+    ("v", "_toggle_z_proj", ()),
+    # Toggle between XY and Z alignment modes
+    ("m", "_toggle_alignment_mode", ()),
 ]
 
 
@@ -155,6 +160,13 @@ class ManualAlignWidget(QWidget):
         # Discover axis-specific AIPs (XZ, YZ projections)
         self.slice_paths_xz = self._discover_aips(self.aips_xz_dir) if self.aips_xz_dir else {}
         self.slice_paths_yz = self._discover_aips(self.aips_yz_dir) if self.aips_yz_dir else {}
+        # Paired XZ/YZ files — share a common column per pair for correct visual alignment
+        self.pair_paths_xz: dict[tuple[int, int], dict[str, Path]] = (
+            self._discover_pair_aips(self.aips_xz_dir) if self.aips_xz_dir else {}
+        )
+        self.pair_paths_yz: dict[tuple[int, int], dict[str, Path]] = (
+            self._discover_pair_aips(self.aips_yz_dir) if self.aips_yz_dir else {}
+        )
 
         self.slice_ids = list(self.slice_paths.keys())
         self.existing_transforms = discover_transforms(self.transforms_dir) if self.transforms_dir else {}
@@ -306,18 +318,18 @@ class ManualAlignWidget(QWidget):
         self._btn_mode_xy = QPushButton("XY Alignment")
         self._btn_mode_xy.setCheckable(True)
         self._btn_mode_xy.setChecked(True)
-        self._btn_mode_xy.setToolTip("Lateral alignment: adjust TX, TY, and Rotation")
+        self._btn_mode_xy.setToolTip("Lateral alignment: adjust TX, TY, and Rotation  [M to toggle]")
         self._btn_mode_xy.toggled.connect(lambda checked: self._on_mode_btn_toggled("xy", checked))
         mode_row.addWidget(self._btn_mode_xy)
 
         self._btn_mode_z = QPushButton("Z Alignment")
         self._btn_mode_z.setCheckable(True)
         self._btn_mode_z.setChecked(False)
-        self._btn_mode_z.setToolTip("Depth alignment: adjust Z-overlap offsets, view XZ/YZ cross-sections")
+        self._btn_mode_z.setToolTip("Depth alignment: adjust Z-overlap offsets, view XZ/YZ cross-sections  [M to toggle]")
         self._btn_mode_z.toggled.connect(lambda checked: self._on_mode_btn_toggled("z", checked))
         mode_row.addWidget(self._btn_mode_z)
 
-        has_axis_aips = bool(self.slice_paths_xz or self.slice_paths_yz)
+        has_axis_aips = bool(self.slice_paths_xz or self.slice_paths_yz or self.pair_paths_xz or self.pair_paths_yz)
         if not has_axis_aips:
             self._btn_mode_z.setEnabled(False)
             self._btn_mode_z.setToolTip("XZ/YZ projections not available — regenerate the data package to enable")
@@ -369,7 +381,7 @@ class ManualAlignWidget(QWidget):
         xy_layout.addLayout(xy_form)
 
         xy_hint = QLabel(
-            "<i style='color: grey;'>Arrow: 1px · Shift: 10px · Ctrl: 50px · [/]: 0.1° · Shift[/]: 1° · Ctrl[/]: 5°</i>"
+            "<i style='color: grey;'>Arrow: 1px · Alt: 10px · Ctrl: 50px · [/]: 0.1° · Alt[/]: 1° · Ctrl[/]: 5°</i>"
         )
         xy_hint.setWordWrap(True)
         xy_layout.addWidget(xy_hint)
@@ -403,12 +415,24 @@ class ManualAlignWidget(QWidget):
 
         z_form = self._form()
 
-        self.proj_combo = QComboBox()
-        self.proj_combo.addItem("XZ — front cross-section")
-        self.proj_combo.addItem("YZ — side cross-section")
-        self.proj_combo.setToolTip("Switch between front (XZ) and side (YZ) cross-section views")
-        self.proj_combo.currentIndexChanged.connect(self._on_z_proj_changed)
-        z_form.addRow("View:", self.proj_combo)
+        self._btn_proj_xz = QPushButton("XZ")
+        self._btn_proj_xz.setCheckable(True)
+        self._btn_proj_xz.setChecked(True)
+        self._btn_proj_xz.setToolTip("Front cross-section (Z-X plane)  [V to toggle]")
+        self._btn_proj_yz = QPushButton("YZ")
+        self._btn_proj_yz.setCheckable(True)
+        self._btn_proj_yz.setToolTip("Side cross-section (Z-Y plane)  [V to toggle]")
+        self._proj_btn_group = QButtonGroup(self)
+        self._proj_btn_group.setExclusive(True)
+        self._proj_btn_group.addButton(self._btn_proj_xz, 0)
+        self._proj_btn_group.addButton(self._btn_proj_yz, 1)
+        self._proj_btn_group.idClicked.connect(self._on_z_proj_changed)
+        proj_row = QHBoxLayout()
+        proj_row.setSpacing(4)
+        proj_row.addWidget(self._btn_proj_xz)
+        proj_row.addWidget(self._btn_proj_yz)
+        proj_row.addStretch()
+        z_form.addRow("View:", proj_row)
 
         self.spin_fixed_z = QSpinBox()
         self.spin_fixed_z.setRange(0, 200)
@@ -564,20 +588,37 @@ class ManualAlignWidget(QWidget):
                 aips[int(m.group(1))] = p
         return dict(sorted(aips.items()))
 
+    @staticmethod
+    def _discover_pair_aips(aips_dir: Path) -> dict[tuple[int, int], dict[str, Path]]:
+        """Discover paired XZ/YZ NPZ files (``pair_z{fid:02d}_z{mid:02d}_{role}.npz``).
+
+        Returns ``{(fid, mid): {"fixed": Path, "moving": Path}}``.
+        """
+        import re
+
+        pattern = re.compile(r"pair_z(\d+)_z(\d+)_(fixed|moving)\.npz$")
+        result: dict[tuple[int, int], dict[str, Path]] = {}
+        for p in sorted(aips_dir.iterdir()):
+            m = pattern.match(p.name)
+            if m:
+                key = (int(m.group(1)), int(m.group(2)))
+                result.setdefault(key, {})[m.group(3)] = p
+        return result
+
     def _discover_axis_aip_dirs(self, pkg_root: Path) -> None:
         """Discover aips_xz/ and aips_yz/ directories in the package root."""
-        for name, attr in [("aips_xz", "aips_xz_dir"), ("aips_yz", "aips_yz_dir")]:
+        for name, attr, paths_attr, pair_attr in [
+            ("aips_xz", "aips_xz_dir", "slice_paths_xz", "pair_paths_xz"),
+            ("aips_yz", "aips_yz_dir", "slice_paths_yz", "pair_paths_yz"),
+        ]:
             candidate = pkg_root / name
             if candidate.exists():
                 setattr(self, attr, candidate)
-                paths = self._discover_aips(candidate)
-                if name == "aips_xz":
-                    self.slice_paths_xz = paths
-                else:
-                    self.slice_paths_yz = paths
+                setattr(self, paths_attr, self._discover_aips(candidate))
+                setattr(self, pair_attr, self._discover_pair_aips(candidate))
 
         # Enable the Z Alignment button if axis AIPs are now available
-        has_axis_aips = bool(self.slice_paths_xz or self.slice_paths_yz)
+        has_axis_aips = bool(self.slice_paths_xz or self.slice_paths_yz or self.pair_paths_xz or self.pair_paths_yz)
         self._btn_mode_z.setEnabled(has_axis_aips)
         if has_axis_aips:
             self._btn_mode_z.setToolTip("Depth alignment: adjust Z-overlap offsets, view XZ/YZ cross-sections")
@@ -619,28 +660,43 @@ class ManualAlignWidget(QWidget):
             tx, ty = adjust_for_rotation_center(tx, ty, rot, tfm_center, (img_center[0] * scale, img_center[1] * scale))
         return AlignmentState(tx=tx / scale, ty=ty / scale, rotation=rot)
 
-    def _load_pair(self, idx: int) -> None:
+    def _load_pair(self, idx: int, preserve_camera: bool = False) -> None:
         """Load a slice pair and display as red/green AIP overlay."""
         self.current_pair_idx = idx
         fid, mid = self.pairs[idx]
 
         self.viewer.status = f"Loading z{fid:02d} / z{mid:02d}..."
 
-        # Select AIP paths based on projection mode
-        if self._projection_mode == "xz" and self.slice_paths_xz:
-            aip_paths = self.slice_paths_xz
-        elif self._projection_mode == "yz" and self.slice_paths_yz:
-            aip_paths = self.slice_paths_yz
+        # Select AIP paths based on projection mode.
+        # For XZ/YZ: prefer paired files (both slices at the same column),
+        # fall back to per-slice files, then fall back to XY.
+        _pair_key = (fid, mid)
+        if self._projection_mode in ("xz", "yz"):
+            pair_store = self.pair_paths_xz if self._projection_mode == "xz" else self.pair_paths_yz
+            per_slice_store = self.slice_paths_xz if self._projection_mode == "xz" else self.slice_paths_yz
+            if _pair_key in pair_store and "fixed" in pair_store[_pair_key] and "moving" in pair_store[_pair_key]:
+                # Paired files: use explicit fixed/moving paths
+                _fixed_npz = pair_store[_pair_key]["fixed"]
+                _moving_npz = pair_store[_pair_key]["moving"]
+                _use_paired = True
+            elif fid in per_slice_store and mid in per_slice_store:
+                _fixed_npz = per_slice_store[fid]
+                _moving_npz = per_slice_store[mid]
+                _use_paired = False
+            else:
+                logger.warning(f"No {self._projection_mode.upper()} AIPs for pair z{fid:02d}→z{mid:02d}")
+                _fixed_npz = _moving_npz = None
+                _use_paired = False
         else:
-            aip_paths = self.slice_paths
+            _fixed_npz = _moving_npz = None
+            _use_paired = False
 
-        if fid not in aip_paths or mid not in aip_paths:
-            logger.warning(f"No {self._projection_mode.upper()} AIPs for pair z{fid:02d}→z{mid:02d}")
-            aip_paths = self.slice_paths  # fall back to XY
-
-        if self._use_precomputed_aips:
-            fixed_aip, fixed_scale_yx = self._load_aip_from_npz(aip_paths[fid])
-            moving_aip, moving_scale_yx = self._load_aip_from_npz(aip_paths[mid])
+        if self._projection_mode in ("xz", "yz") and _fixed_npz is not None:
+            fixed_aip, fixed_scale_yx = self._load_aip_from_npz(_fixed_npz)
+            moving_aip, moving_scale_yx = self._load_aip_from_npz(_moving_npz)
+        elif self._use_precomputed_aips:
+            fixed_aip, fixed_scale_yx = self._load_aip_from_npz(self.slice_paths[fid])
+            moving_aip, moving_scale_yx = self._load_aip_from_npz(self.slice_paths[mid])
         else:
             fixed_aip, fixed_scale_yx = load_aip_from_ome_zarr(self.slice_paths[fid], level=self.level)
             moving_aip, moving_scale_yx = load_aip_from_ome_zarr(self.slice_paths[mid], level=self.level)
@@ -653,9 +709,16 @@ class ManualAlignWidget(QWidget):
         # the napari canvas tightly fits the brain and does not include the large
         # dark tiled-mosaic border.  The same (row, col) box is applied to the
         # moving AIP so that relative tx/ty shifts are unchanged.
-        r1, c1, r2, c2 = content_bbox(fixed_aip)
-        fixed_aip = fixed_aip[r1:r2, c1:c2].copy()
-        moving_aip = moving_aip[r1:r2, c1:c2].copy()
+        #
+        # Only crop in XY mode.  For XZ/YZ the row axis is the Z-depth of the
+        # volume, and cropping it removes the empty Z-space that makes the
+        # separation between the two slices visible.
+        if self._projection_mode == "xy":
+            r1, c1, r2, c2 = content_bbox(fixed_aip)
+            fixed_aip = fixed_aip[r1:r2, c1:c2].copy()
+            moving_aip = moving_aip[r1:r2, c1:c2].copy()
+        else:
+            r1, c1 = 0, 0
         # Preserve crop origin (working-level pixels) for transform-centre accounting
         self._crop_rc: tuple[int, int] = (r1, c1)
 
@@ -755,7 +818,8 @@ class ManualAlignWidget(QWidget):
         self._suppress_spinbox_event = False
         self._update_status()
 
-        self.viewer.reset_view()
+        if not preserve_camera:
+            self.viewer.reset_view()
         self.viewer.status = f"Pair z{fid:02d} → z{mid:02d} loaded ({self._projection_mode.upper()} view)"
 
     def _load_aip_from_npz(self, npz_path: Path) -> tuple[np.ndarray, list[float]]:
@@ -849,9 +913,12 @@ class ManualAlignWidget(QWidget):
             self.moving_layer.translate = [state.ty * sy, state.tx * sx]
         else:
             # XZ/YZ mode: pure translation only (no rotation).
-            # Z-offset expressed as vertical (row) translation; tx/ty as horizontal.
+            # The export script flips Z ([::-1]) so row 0 = deepest voxel.
+            # A higher Z-index therefore maps to a LOWER row index, so the
+            # correct shift to bring the overlap regions into alignment is
+            # (moving_z - fixed_z) / scale, not (fixed_z - moving_z).
             offsets = self._current_offsets.get(mid, (0, 0))
-            dz_display = (offsets[0] - offsets[1]) / 2**self.level
+            dz_display = (offsets[1] - offsets[0]) / 2**self.level
             horiz = state.tx if self._projection_mode == "xz" else state.ty
             self.moving_layer.rotate = 0.0
             self.moving_layer.translate = [dz_display * sy, horiz * sx]
@@ -879,7 +946,7 @@ class ManualAlignWidget(QWidget):
 
     def _on_pair_changed(self, idx: int) -> None:
         if idx >= 0 and idx != self.current_pair_idx:
-            self._load_pair(idx)
+            self._load_pair_preserve_camera(idx)
 
     def _on_spinbox_changed(self) -> None:
         if self._suppress_spinbox_event:
@@ -921,19 +988,18 @@ class ManualAlignWidget(QWidget):
             self._mode_stack.setCurrentIndex(0)
         else:
             self._btn_mode_xy.setChecked(False)
-            z_proj_idx = self.proj_combo.currentIndex()
-            self._projection_mode = "xz" if z_proj_idx == 0 else "yz"
+            self._projection_mode = "xz" if self._btn_proj_xz.isChecked() else "yz"
             self._mode_stack.setCurrentIndex(1)
         if self.pairs:
             self._load_pair(self.current_pair_idx)
 
-    def _on_z_proj_changed(self, idx: int) -> None:
+    def _on_z_proj_changed(self, btn_id: int) -> None:
         """Switch between XZ and YZ within the Z Alignment page."""
         if self._projection_mode == "xy":
             return  # ignore if XY mode is active
-        self._projection_mode = "xz" if idx == 0 else "yz"
+        self._projection_mode = "xz" if btn_id == 0 else "yz"
         if self.pairs:
-            self._load_pair(self.current_pair_idx)
+            self._load_pair_preserve_camera(self.current_pair_idx)
 
     def _on_z_offset_changed(self) -> None:
         """Handle Z-offset spinbox changes."""
@@ -960,11 +1026,11 @@ class ManualAlignWidget(QWidget):
 
     def _prev_pair(self) -> None:
         if self.current_pair_idx > 0:
-            self._load_pair(self.current_pair_idx - 1)
+            self._load_pair_preserve_camera(self.current_pair_idx - 1)
 
     def _next_pair(self) -> None:
         if self.current_pair_idx < len(self.pairs) - 1:
-            self._load_pair(self.current_pair_idx + 1)
+            self._load_pair_preserve_camera(self.current_pair_idx + 1)
 
     # ----- Undo / redo -----
 
@@ -1043,6 +1109,23 @@ class ManualAlignWidget(QWidget):
 
     def _save_all_and_exit(self) -> None:
         """Save all modified pairs and close."""
+        unsaved = [mid for _fid, mid in self.pairs if mid in self.unsaved_changes and self.undo_stacks.get(mid) is not None]
+        total_saved = len(self.saved_pairs)
+        msg = QMessageBox(self)
+        msg.setWindowTitle("Save All & Exit")
+        msg.setIcon(QMessageBox.Question)
+        if unsaved:
+            msg.setText(
+                f"Save {len(unsaved)} modified pair(s) and exit?\n\n{total_saved} pair(s) were already saved in this session."
+            )
+        else:
+            msg.setText(f"No unsaved changes. Exit?\n\n{total_saved} pair(s) were saved in this session.")
+        msg.setStandardButtons(QMessageBox.Ok | QMessageBox.Cancel)
+        msg.setDefaultButton(QMessageBox.Ok)
+        msg.button(QMessageBox.Ok).setText("Save && Exit" if unsaved else "Exit")
+        if msg.exec() != QMessageBox.Ok:
+            return
+
         count = 0
         for _fid, mid in self.pairs:
             if mid not in self.unsaved_changes:
@@ -1190,8 +1273,8 @@ class ManualAlignWidget(QWidget):
 
         hint = (
             "<i style='color: grey;'>"
-            "Arrow: 1px · Shift+Arrow: 10px · Ctrl+Arrow: 50px"
-            " · [/]: 0.1° · Shift+[/]: 1° · Ctrl+[/]: 5°"
+            "Arrow: 1px · Alt+Arrow: 10px · Ctrl+Arrow: 50px"
+            " · [/]: 0.1° · Alt+[/]: 1° · Ctrl+[/]: 5°"
             "</i>"
         )
         lines.append(hint)
@@ -1278,17 +1361,114 @@ class ManualAlignWidget(QWidget):
 
         if self.fixed_layer is not None:
             self.fixed_layer.data = self._original_fixed_aip
+
         if self.moving_layer is not None:
-            # Re-apply rotation + translation on top of the new enhanced base
+            if self._projection_mode == "xy":
+                # XY: bake rotation + translation into pixel data
+                state = self._current_state()
+                self._apply_state(state, push=False)
+            else:
+                # XZ/YZ: _apply_state only sets translate/rotate and never touches
+                # .data, so update it explicitly here.
+                self.moving_layer.data = self._original_moving_aip
+
+        # Refresh composite overlay (Difference / Checkerboard) if active
+        if self._overlay_mode != OVERLAY_COLOR and self._composite_layer is not None:
             state = self._current_state()
-            self._apply_state(state, push=False)
+            self._refresh_composite(state)
 
     def _nudge_translate(self, dx: float, dy: float) -> None:
+        if self._projection_mode != "xy" and dy != 0:
+            # In Z alignment mode Up/Down adjusts the moving Z-overlap voxel index.
+            # Pressing Up (dy=-1) decreases moving_z so the moving layer shifts up,
+            # which reveals more of the fixed slice below — intuitive for finding overlap.
+            self._nudge_z_offset(int(-dy))
+            return
         state = self._current_state()
-        state.tx += dx
-        state.ty += dy
+        if self._projection_mode == "yz":
+            # In YZ mode the horizontal axis maps to ty (Y), not tx (X).
+            state.ty += dx
+        else:
+            state.tx += dx
+            state.ty += dy
         self._apply_state(state, push=True)
         self._update_status()
+
+    def _nudge_z_offset(self, delta: int) -> None:
+        """Adjust the moving Z-overlap voxel index by *delta* (Z alignment mode only).
+
+        When moving_z hits its bound the overflow is absorbed by fixed_z in the
+        opposite direction — both changes shift the visual overlap by the same
+        amount because dz_display = (moving_z - fixed_z) / scale.
+        """
+        if not self.pairs:
+            return
+        new_moving = self.spin_moving_z.value() + delta
+        lo, hi = self.spin_moving_z.minimum(), self.spin_moving_z.maximum()
+        if new_moving < lo:
+            overflow = lo - new_moving  # how many steps past the lower bound
+            self.spin_moving_z.setValue(lo)
+            new_fixed = min(self.spin_fixed_z.maximum(), self.spin_fixed_z.value() + overflow)
+            self.spin_fixed_z.setValue(new_fixed)
+        elif new_moving > hi:
+            overflow = new_moving - hi  # how many steps past the upper bound
+            self.spin_moving_z.setValue(hi)
+            new_fixed = max(self.spin_fixed_z.minimum(), self.spin_fixed_z.value() - overflow)
+            self.spin_fixed_z.setValue(new_fixed)
+        else:
+            self.spin_moving_z.setValue(new_moving)
+
+    def _restore_camera(self, zoom: float, center: tuple) -> None:
+        """Re-apply a previously snapshotted camera state."""
+        self.viewer.camera.zoom = zoom
+        self.viewer.camera.center = center
+
+    def _load_pair_preserve_camera(self, idx: int) -> None:
+        """Load a pair while keeping the current zoom level and position."""
+        zoom = self.viewer.camera.zoom
+        center = tuple(self.viewer.camera.center)
+        self._load_pair(idx, preserve_camera=True)
+        QTimer.singleShot(0, lambda: self._restore_camera(zoom, center))
+
+    def _toggle_z_proj(self) -> None:
+        """Switch between XZ and YZ views (Z alignment mode only)."""
+        if self._projection_mode == "xy":
+            return
+        # idClicked only fires on real mouse clicks; block signals and call
+        # the handler directly so the display is updated on keyboard use too.
+        if self._projection_mode == "xz":
+            self._proj_btn_group.blockSignals(True)
+            self._btn_proj_yz.setChecked(True)
+            self._proj_btn_group.blockSignals(False)
+            self._on_z_proj_changed(1)
+        else:
+            self._proj_btn_group.blockSignals(True)
+            self._btn_proj_xz.setChecked(True)
+            self._proj_btn_group.blockSignals(False)
+            self._on_z_proj_changed(0)
+
+    def _toggle_alignment_mode(self) -> None:
+        """Toggle between XY Alignment and Z Alignment modes."""
+        # Block signals on both buttons to prevent re-entrant toggled calls,
+        # set the visual state, then invoke the handler once directly.
+        if self._projection_mode == "xy":
+            if not self._btn_mode_z.isEnabled():
+                return
+            self._btn_mode_xy.blockSignals(True)
+            self._btn_mode_z.blockSignals(True)
+            self._btn_mode_xy.setChecked(False)
+            self._btn_mode_z.setChecked(True)
+            self._btn_mode_xy.blockSignals(False)
+            self._btn_mode_z.blockSignals(False)
+            self._on_mode_btn_toggled("z", True)
+        else:
+            self._btn_mode_xy.blockSignals(True)
+            self._btn_mode_z.blockSignals(True)
+            self._btn_mode_xy.setChecked(True)
+            self._btn_mode_z.setChecked(False)
+            self._btn_mode_xy.blockSignals(False)
+            self._btn_mode_z.blockSignals(False)
+            self._on_mode_btn_toggled("xy", True)
 
     def _nudge_rotate(self, delta_deg: float) -> None:
         state = self._current_state()
