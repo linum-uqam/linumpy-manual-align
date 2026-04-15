@@ -62,7 +62,10 @@ _CS_SERVER_SCRIPT = """\
 import os, sys, numpy as np, base64, io
 from linumpy.io.zarr import read_omezarr
 
-os.unlink(sys.argv[0])   # self-delete; kernel keeps process alive
+try:
+    os.unlink(sys.argv[0])   # self-delete; kernel keeps process alive
+except OSError:
+    pass  # already deleted by a concurrent reader (harmless)
 
 zarr_path = sys.argv[1]
 level = int(sys.argv[2])
@@ -145,17 +148,21 @@ def open_remote_slice_reader(
     server: ServerConfig,
     remote_zarr_path: str,
     level: int = 0,
+    reader_id: int = 0,
 ) -> RemoteSliceReader:
     """Open a persistent SSH+Python process for *remote_zarr_path*.
 
-    Uploads the server-side script to ``/tmp/cs_server_{pid}.py``, starts
-    the process, reads the ``"ready Z Y X scale"`` handshake, and returns a
-    ready-to-use ``RemoteSliceReader``.
+    Uploads the server-side script to ``/tmp/cs_server_{pid}_{reader_id}.py``,
+    starts the process, reads the ``"ready Z Y X scale"`` handshake, and
+    returns a ready-to-use ``RemoteSliceReader``.
 
-    Raises ``RuntimeError`` if the handshake fails within 30 s.
+    *reader_id* (typically the slice ID) is used to give each concurrent
+    reader a unique script path so simultaneous uploads don't collide.
+
+    Raises ``RuntimeError`` if the handshake fails.
     """
     pid = os.getpid()
-    remote_script = f"/tmp/cs_server_{pid}.py"
+    remote_script = f"/tmp/cs_server_{pid}_{reader_id}.py"
 
     # Upload the server-side script via SSH echo (single round-trip, avoids SCP)
     upload_cmd = ["ssh", server.host, f"cat > {remote_script}"]
@@ -184,8 +191,16 @@ def open_remote_slice_reader(
         raise RuntimeError(f"SSH reader process failed before handshake: {exc}") from exc
 
     if not line.startswith("ready"):
-        proc.terminate()
-        raise RuntimeError(f"Unexpected handshake from server: {line!r}")
+        # Process exited before handshake — read stderr for the actual error.
+        try:
+            proc.wait(timeout=5)
+            stderr = proc.stderr.read().decode(errors="replace").strip()
+        except subprocess.TimeoutExpired:
+            proc.terminate()
+            stderr = "(process still running — check zarr path)"
+        raise RuntimeError(
+            f"Server process exited before handshake.\n  zarr: {remote_zarr_path}\n  stdout: {line!r}\n  stderr: {stderr}"
+        )
 
     parts = line.split()
     # parts: ["ready", Z, Y, X, "s0,s1,s2"]  (scale is comma-joined by the script)
@@ -226,7 +241,7 @@ class SliceReaderWorker(QThread):
 
     def run(self) -> None:
         try:
-            reader = open_remote_slice_reader(self._server, self._remote_zarr_path, self._level)
+            reader = open_remote_slice_reader(self._server, self._remote_zarr_path, self._level, reader_id=self._slice_id)
             reader.slice_id = self._slice_id
             self.ready.emit(self._slice_id, reader)
         except Exception as exc:
