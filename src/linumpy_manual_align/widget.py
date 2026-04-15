@@ -224,7 +224,7 @@ class ManualAlignWidget(QWidget):
         # Exact remote zarr filename per slice ID (e.g. "slice_z02_normalize.ome.zarr").
         # Loaded from metadata; falls back to "slice_z{sid:02d}.ome.zarr" when absent.
         self._slice_filenames: dict[int, str] = {}
-        # Current interactive cross-section positions.
+        # Moving slice cross-section position (slider-controlled; fixed slice uses static NPZ).
         self._cross_section_y: int = 0
         self._cross_section_x: int = 0
         # Debounce timer for slider-driven requests.
@@ -513,14 +513,14 @@ class ManualAlignWidget(QWidget):
         self.slider_cs_y.setMaximum(0)
         self.slider_cs_y.setValue(0)
         self.slider_cs_y.setEnabled(False)
-        self.slider_cs_y.setToolTip("Y position of the XZ cross-section — slide to explore different columns  [Alt-, / Alt-.]")
+        self.slider_cs_y.setToolTip("Moving slice Y position — slide to find matching tissue  [Alt-, / Alt-.]")
         self._lbl_cs_y = QLabel("0")
         self._lbl_cs_y.setFixedWidth(40)
         cs_y_row = QHBoxLayout()
         cs_y_row.setSpacing(4)
         cs_y_row.addWidget(self.slider_cs_y)
         cs_y_row.addWidget(self._lbl_cs_y)
-        self._cs_y_form_row_label = QLabel("Y position:")
+        self._cs_y_form_row_label = QLabel("Moving Y:")
         z_form.addRow(self._cs_y_form_row_label, cs_y_row)
 
         self.slider_cs_x = QSlider(Qt.Horizontal)
@@ -528,14 +528,14 @@ class ManualAlignWidget(QWidget):
         self.slider_cs_x.setMaximum(0)
         self.slider_cs_x.setValue(0)
         self.slider_cs_x.setEnabled(False)
-        self.slider_cs_x.setToolTip("X position of the YZ cross-section — slide to explore different columns  [Alt-, / Alt-.]")
+        self.slider_cs_x.setToolTip("Moving slice X position — slide to find matching tissue  [Alt-, / Alt-.]")
         self._lbl_cs_x = QLabel("0")
         self._lbl_cs_x.setFixedWidth(40)
         cs_x_row = QHBoxLayout()
         cs_x_row.setSpacing(4)
         cs_x_row.addWidget(self.slider_cs_x)
         cs_x_row.addWidget(self._lbl_cs_x)
-        self._cs_x_form_row_label = QLabel("X position:")
+        self._cs_x_form_row_label = QLabel("Moving X:")
         z_form.addRow(self._cs_x_form_row_label, cs_x_row)
 
         # Loading indicator shown while a reader is opening
@@ -1056,12 +1056,6 @@ class ManualAlignWidget(QWidget):
         if self._overlay_mode != OVERLAY_COLOR and self._projection_mode == "xy":
             self._refresh_composite(state)
 
-        # In XZ/YZ mode an XY-transform change shifts which column of the moving zarr
-        # we should display.  Refresh immediately (from cache) and queue a re-fetch.
-        if self._projection_mode in ("xz", "yz"):
-            self._refresh_cross_section()
-            self._cs_debounce_timer.start(150)
-
         # Sync spinboxes
         self._suppress_spinbox_event = True
         self.spin_tx.setValue(state.tx)
@@ -1198,67 +1192,64 @@ class ManualAlignWidget(QWidget):
             pass
 
     def _ensure_readers_for_pair(self) -> None:
-        """Start SliceReaderWorkers for both slices of the current pair if not already open."""
+        """Start a SliceReaderWorker for the moving slice of the current pair.
+
+        The fixed slice is always shown from the static downloaded NPZ — no reader needed.
+        """
         if not self.pairs or self._slices_remote_dir is None or self.server_config is None:
             return
-        fid, mid = self.pairs[self.current_pair_idx]
-        for sid in (fid, mid):
-            if sid in self._readers or sid in self._reader_workers:
-                continue
-            zarr_name = self._slice_filenames.get(sid, f"slice_z{sid:02d}.ome.zarr")
-            remote_path = f"{self._slices_remote_dir}/{zarr_name}"
-            worker = SliceReaderWorker(self.server_config, sid, remote_path, self._cs_level)
-            worker.ready.connect(self._on_reader_ready)
-            worker.failed.connect(self._on_reader_failed)
-            self._reader_workers[sid] = worker
-            worker.start()
-        self._cs_loading_label.setText("Opening remote readers…")
+        _fid, mid = self.pairs[self.current_pair_idx]
+        if mid in self._readers or mid in self._reader_workers:
+            return
+        zarr_name = self._slice_filenames.get(mid, f"slice_z{mid:02d}.ome.zarr")
+        remote_path = f"{self._slices_remote_dir}/{zarr_name}"
+        worker = SliceReaderWorker(self.server_config, mid, remote_path, self._cs_level)
+        worker.ready.connect(self._on_reader_ready)
+        worker.failed.connect(self._on_reader_failed)
+        self._reader_workers[mid] = worker
+        worker.start()
+        self._cs_loading_label.setText("Opening remote reader for moving slice…")
 
     def _on_reader_ready(self, sid: int, reader: RemoteSliceReader) -> None:
-        """Called when a SliceReaderWorker finishes opening a reader."""
+        """Called when the moving-slice SliceReaderWorker finishes opening."""
         self._reader_workers.pop(sid, None)
         self._readers[sid] = reader
 
-        # If no more pending workers for the current pair, trigger initial fetch
         if not self.pairs:
             return
         fid, mid = self.pairs[self.current_pair_idx]
-        if sid not in (fid, mid):
+        if sid != mid:
             return
-        if fid in self._readers and mid in self._readers:
-            self._cs_loading_label.setText("")
-            # Set slider ranges from the reader shape now that we know dimensions
-            fid_reader = self._readers[fid]
-            _nz, ny, nx = fid_reader.shape
 
-            # Choose initial Y: use stored tissue centroid if it looks valid
-            # (i.e. it was set to something other than 0 by _load_pair),
-            # otherwise fall back to the middle of the volume.
-            init_y = self._cross_section_y if 0 < self._cross_section_y < ny else ny // 2
-            init_x = self._cross_section_x if 0 < self._cross_section_x < nx else nx // 2
+        self._cs_loading_label.setText("")
+        _nz, ny, nx = reader.shape
 
+        # Initial moving position: tissue centroid (from NPZ center_pos) offset by
+        # the current XY transform so the reader opens on matching tissue.
+        axis = self._projection_mode  # "xz" or "yz"
+        center = self._cross_section_y if axis == "xz" else self._cross_section_x
+        init = center + self._cs_moving_offset(axis)
+
+        if axis == "xz":
+            init = max(0, min(ny - 1, init))
             self.slider_cs_y.blockSignals(True)
             self.slider_cs_y.setMaximum(ny - 1)
-            self.slider_cs_y.setValue(init_y)
+            self.slider_cs_y.setValue(init)
             self.slider_cs_y.blockSignals(False)
-            self._lbl_cs_y.setText(str(init_y))
-            self._cross_section_y = init_y
-
+            self._lbl_cs_y.setText(str(init))
+            self._cross_section_y = init
+        else:
+            init = max(0, min(nx - 1, init))
             self.slider_cs_x.blockSignals(True)
             self.slider_cs_x.setMaximum(nx - 1)
-            self.slider_cs_x.setValue(init_x)
+            self.slider_cs_x.setValue(init)
             self.slider_cs_x.blockSignals(False)
-            self._lbl_cs_x.setText(str(init_x))
-            self._cross_section_x = init_x
+            self._lbl_cs_x.setText(str(init))
+            self._cross_section_x = init
 
-            # Fetch the initial position (moving slice offset by current XY transform)
-            axis = self._projection_mode  # "xz" or "yz"
-            fixed_pos = init_y if axis == "xz" else init_x
-            moving_pos = fixed_pos + self._cs_moving_offset(axis)
-            self._request_cross_section(fid, axis, fixed_pos)
-            self._request_cross_section(mid, axis, moving_pos)
-        elif not self._reader_workers:
-            self._cs_loading_label.setText(f"Waiting for z{fid:02d} / z{mid:02d}…")
+        # Fetch moving slice at initial position; fixed layer already shows static NPZ
+        self._request_cross_section(mid, axis, init)
+        _ = fid  # fixed slice uses static NPZ, no remote fetch needed
 
     def _on_reader_failed(self, sid: int, msg: str) -> None:
         """Called when a SliceReaderWorker fails to open."""
@@ -1324,30 +1315,28 @@ class ManualAlignWidget(QWidget):
         return -round(state.tx * scale)
 
     def _refresh_cross_section(self) -> None:
-        """Update layer data from the cache for the current pair and position."""
+        """Update the moving layer from the cache at the current slider position.
+
+        The fixed layer is always the static downloaded NPZ — we never overwrite it.
+        """
         if not self.pairs or self._projection_mode == "xy":
             return
-        fid, mid = self.pairs[self.current_pair_idx]
+        _fid, mid = self.pairs[self.current_pair_idx]
         axis = self._projection_mode
-        fixed_pos = self._cross_section_y if axis == "xz" else self._cross_section_x
-        moving_pos = fixed_pos + self._cs_moving_offset(axis)
-        for sid, layer, pos in ((fid, self.fixed_layer, fixed_pos), (mid, self.moving_layer, moving_pos)):
-            img = self._cs_cache.get(sid, {}).get(axis, {}).get(pos)
-            if img is not None and layer is not None:
-                layer.data = normalize_aip(img.astype(np.float32))
+        pos = self._cross_section_y if axis == "xz" else self._cross_section_x
+        img = self._cs_cache.get(mid, {}).get(axis, {}).get(pos)
+        if img is not None and self.moving_layer is not None:
+            self.moving_layer.data = normalize_aip(img.astype(np.float32))
 
     def _on_cs_slider_settled(self) -> None:
-        """Called after the debounce timer fires — fetch both slices at the (offset-corrected) position."""
+        """Called after the debounce timer fires — fetch moving slice at the new position."""
         if not self.pairs or self._projection_mode == "xy":
             return
-        fid, mid = self.pairs[self.current_pair_idx]
+        _fid, mid = self.pairs[self.current_pair_idx]
         axis = self._projection_mode
-        fixed_pos = self._cross_section_y if axis == "xz" else self._cross_section_x
-        moving_pos = fixed_pos + self._cs_moving_offset(axis)
-        self._request_cross_section(fid, axis, fixed_pos)
-        self._request_cross_section(mid, axis, moving_pos)
-        self._prefetch_around(fid, axis, fixed_pos)
-        self._prefetch_around(mid, axis, moving_pos)
+        pos = self._cross_section_y if axis == "xz" else self._cross_section_x
+        self._request_cross_section(mid, axis, pos)
+        self._prefetch_around(mid, axis, pos)
 
     def _prefetch_around(self, sid: int, axis: str, pos: int) -> None:
         """Pre-fetch cross-sections at ±5 steps around *pos* for *sid*.
