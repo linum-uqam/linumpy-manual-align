@@ -63,7 +63,12 @@ from linumpy_manual_align.image_utils import (
     normalize_aip,
 )
 from linumpy_manual_align.omezarr_io import load_aip_from_ome_zarr
-from linumpy_manual_align.server_transfer import ScpWorker
+from linumpy_manual_align.server_transfer import (
+    CrossSectionWorker,
+    RemoteSliceReader,
+    ScpWorker,
+    SliceReaderWorker,
+)
 from linumpy_manual_align.state import AlignmentState, UndoStack
 from linumpy_manual_align.transform_io import (
     adjust_for_rotation_center,
@@ -118,6 +123,9 @@ _KEYBINDINGS: list[tuple[str, str, tuple]] = [
     ("v", "_toggle_z_proj", ()),
     # Toggle between XY and Z alignment modes
     ("m", "_toggle_alignment_mode", ()),
+    # Interactive cross-section slider nudge (step 10 px) — Z alignment only
+    ("Alt-,", "_nudge_cs_position", (-10,)),
+    ("Alt-.", "_nudge_cs_position", (10,)),
 ]
 
 
@@ -201,6 +209,24 @@ class ManualAlignWidget(QWidget):
         self._worker: ScpWorker | None = None  # prevent GC of background thread
         self._close_confirmed = False
 
+        # ── Interactive XZ/YZ via remote OME-Zarr ──────────────────────────────
+        # Populated from manual_align_metadata.json after package load.
+        self._slices_remote_dir: str | None = None
+        self._cs_level: int = 0
+        # One persistent SSH reader per slice ID — opened lazily, kept open.
+        self._readers: dict[int, RemoteSliceReader] = {}
+        # SliceReaderWorker threads opening readers (sid → worker).
+        self._reader_workers: dict[int, SliceReaderWorker] = {}
+        # CrossSectionWorker threads for in-flight requests.
+        self._cs_workers: list[CrossSectionWorker] = []
+        # Cache: sid → axis → pos → img_array
+        self._cs_cache: dict[int, dict[str, dict[int, np.ndarray]]] = {}
+        # Current interactive cross-section positions.
+        self._cross_section_y: int = 0
+        self._cross_section_x: int = 0
+        # Debounce timer for slider-driven requests.
+        self._cs_debounce_timer: QTimer | None = None
+
         # Projection mode and Z-overlap state
         self._projection_mode = "xy"  # "xy", "xz", "yz"
         self._current_offsets: dict[int, tuple[int, int]] = {}  # mid -> (fixed_z, moving_z)
@@ -241,6 +267,33 @@ class ManualAlignWidget(QWidget):
     def _use_precomputed_aips(self) -> bool:
         """True when pre-computed NPZ AIPs are available (``aips_dir`` is set)."""
         return self.aips_dir is not None
+
+    def _set_cs_sliders_visible(self, visible: bool) -> None:
+        """Show or hide the interactive cross-section slider rows."""
+        for widget in (
+            self.slider_cs_y,
+            self._lbl_cs_y,
+            self._cs_y_form_row_label,
+            self.slider_cs_x,
+            self._lbl_cs_x,
+            self._cs_x_form_row_label,
+            self._cs_loading_label,
+        ):
+            widget.setVisible(visible)
+
+    def _update_cs_slider_visibility(self) -> None:
+        """Show the correct cross-section slider for the current projection mode."""
+        if self._slices_remote_dir is None:
+            return
+        xz = self._projection_mode == "xz"
+        yz = self._projection_mode == "yz"
+        self.slider_cs_y.setVisible(xz)
+        self._lbl_cs_y.setVisible(xz)
+        self._cs_y_form_row_label.setVisible(xz)
+        self.slider_cs_x.setVisible(yz)
+        self._lbl_cs_x.setVisible(yz)
+        self._cs_x_form_row_label.setVisible(yz)
+        self._cs_loading_label.setVisible(xz or yz)
 
     def _refresh_saved_pairs(self) -> None:
         """Scan output_dir and pre-populate saved_pairs with already-written transforms."""
@@ -451,6 +504,45 @@ class ManualAlignWidget(QWidget):
         self.z_relative_label = QLabel("Relative shift: 0 voxels")
         z_form.addRow("", self.z_relative_label)
 
+        # Interactive cross-section sliders (only shown when a remote reader is active)
+        self.slider_cs_y = QSlider(Qt.Horizontal)
+        self.slider_cs_y.setMinimum(0)
+        self.slider_cs_y.setMaximum(0)
+        self.slider_cs_y.setValue(0)
+        self.slider_cs_y.setEnabled(False)
+        self.slider_cs_y.setToolTip("Y position of the XZ cross-section — slide to explore different columns  [Alt-, / Alt-.]")
+        self._lbl_cs_y = QLabel("0")
+        self._lbl_cs_y.setFixedWidth(40)
+        cs_y_row = QHBoxLayout()
+        cs_y_row.setSpacing(4)
+        cs_y_row.addWidget(self.slider_cs_y)
+        cs_y_row.addWidget(self._lbl_cs_y)
+        self._cs_y_form_row_label = QLabel("Y position:")
+        z_form.addRow(self._cs_y_form_row_label, cs_y_row)
+
+        self.slider_cs_x = QSlider(Qt.Horizontal)
+        self.slider_cs_x.setMinimum(0)
+        self.slider_cs_x.setMaximum(0)
+        self.slider_cs_x.setValue(0)
+        self.slider_cs_x.setEnabled(False)
+        self.slider_cs_x.setToolTip("X position of the YZ cross-section — slide to explore different columns  [Alt-, / Alt-.]")
+        self._lbl_cs_x = QLabel("0")
+        self._lbl_cs_x.setFixedWidth(40)
+        cs_x_row = QHBoxLayout()
+        cs_x_row.setSpacing(4)
+        cs_x_row.addWidget(self.slider_cs_x)
+        cs_x_row.addWidget(self._lbl_cs_x)
+        self._cs_x_form_row_label = QLabel("X position:")
+        z_form.addRow(self._cs_x_form_row_label, cs_x_row)
+
+        # Loading indicator shown while a reader is opening
+        self._cs_loading_label = QLabel("")
+        self._cs_loading_label.setStyleSheet("color: grey; font-style: italic;")
+        z_form.addRow("", self._cs_loading_label)
+
+        # Hide both slider rows initially; shown once remote metadata is available
+        self._set_cs_sliders_visible(False)
+
         z_layout.addLayout(z_form)
 
         z_hint = QLabel("<i style='color: grey;'>Align tissue boundaries visible in the cross-section overlay.</i>")
@@ -572,6 +664,24 @@ class ManualAlignWidget(QWidget):
         self.status_label = QLabel("")
         self.status_label.setWordWrap(True)
         layout.addWidget(self.status_label)
+
+        # Wire cross-section slider signals (debounced via QTimer)
+        self._cs_debounce_timer = QTimer(self)
+        self._cs_debounce_timer.setSingleShot(True)
+        self._cs_debounce_timer.timeout.connect(self._on_cs_slider_settled)
+
+        def _on_y_changed(v: int) -> None:
+            self._lbl_cs_y.setText(str(v))
+            self._cross_section_y = v
+            self._cs_debounce_timer.start(150)
+
+        def _on_x_changed(v: int) -> None:
+            self._lbl_cs_x.setText(str(v))
+            self._cross_section_x = v
+            self._cs_debounce_timer.start(150)
+
+        self.slider_cs_y.valueChanged.connect(_on_y_changed)
+        self.slider_cs_x.valueChanged.connect(_on_x_changed)
 
     # ----- AIP discovery -----
 
@@ -818,6 +928,19 @@ class ManualAlignWidget(QWidget):
         self._suppress_spinbox_event = False
         self._update_status()
 
+        # Interactive cross-section sliders
+        if self._projection_mode in ("xz", "yz"):
+            if self._slices_remote_dir is not None:
+                self._update_cs_slider_visibility()
+                self._ensure_readers_for_pair()
+                # If readers already open for both slices, refresh immediately
+                if fid in self._readers and mid in self._readers:
+                    self._refresh_cross_section()
+            else:
+                self._set_cs_sliders_visible(False)
+        else:
+            self._set_cs_sliders_visible(False)
+
         if not preserve_camera:
             self.viewer.reset_view()
         self.viewer.status = f"Pair z{fid:02d} → z{mid:02d} loaded ({self._projection_mode.upper()} view)"
@@ -1021,6 +1144,170 @@ class ManualAlignWidget(QWidget):
         moving_z = self.spin_moving_z.value()
         diff = fixed_z - moving_z
         self.z_relative_label.setText(f"Relative shift: {diff:+d} voxels")
+
+    # ----- Interactive XZ/YZ cross-section (remote OME-Zarr) -----
+
+    def _ensure_readers_for_pair(self) -> None:
+        """Start SliceReaderWorkers for both slices of the current pair if not already open."""
+        if not self.pairs or self._slices_remote_dir is None or self.server_config is None:
+            return
+        fid, mid = self.pairs[self.current_pair_idx]
+        for sid in (fid, mid):
+            if sid in self._readers or sid in self._reader_workers:
+                continue
+            zarr_name = f"slice_z{sid:02d}.ome.zarr"
+            remote_path = f"{self._slices_remote_dir}/{zarr_name}"
+            worker = SliceReaderWorker(self.server_config, sid, remote_path, self._cs_level)
+            worker.ready.connect(self._on_reader_ready)
+            worker.failed.connect(self._on_reader_failed)
+            self._reader_workers[sid] = worker
+            worker.start()
+        self._cs_loading_label.setText("Opening remote readers…")
+
+    def _on_reader_ready(self, sid: int, reader: RemoteSliceReader) -> None:
+        """Called when a SliceReaderWorker finishes opening a reader."""
+        self._reader_workers.pop(sid, None)
+        self._readers[sid] = reader
+
+        # If no more pending workers for the current pair, trigger initial fetch
+        if not self.pairs:
+            return
+        fid, mid = self.pairs[self.current_pair_idx]
+        if sid not in (fid, mid):
+            return
+        if fid in self._readers and mid in self._readers:
+            self._cs_loading_label.setText("")
+            # Set slider ranges from the reader shape now that we know dimensions
+            fid_reader = self._readers[fid]
+            _nz, ny, nx = fid_reader.shape
+            self.slider_cs_y.blockSignals(True)
+            self.slider_cs_y.setMaximum(ny - 1)
+            # Set initial position to the tissue centroid from the static cross-section
+            self.slider_cs_y.setValue(min(self._cross_section_y, ny - 1))
+            self.slider_cs_y.blockSignals(False)
+            self._lbl_cs_y.setText(str(self.slider_cs_y.value()))
+
+            self.slider_cs_x.blockSignals(True)
+            self.slider_cs_x.setMaximum(nx - 1)
+            self.slider_cs_x.setValue(min(self._cross_section_x, nx - 1))
+            self.slider_cs_x.blockSignals(False)
+            self._lbl_cs_x.setText(str(self.slider_cs_x.value()))
+
+            # Fetch the initial position
+            axis = self._projection_mode  # "xz" or "yz"
+            pos = self._cross_section_y if axis == "xz" else self._cross_section_x
+            self._request_cross_section(fid, axis, pos)
+            self._request_cross_section(mid, axis, pos)
+        elif not self._reader_workers:
+            self._cs_loading_label.setText(f"Waiting for z{fid:02d} / z{mid:02d}…")
+
+    def _on_reader_failed(self, sid: int, msg: str) -> None:
+        """Called when a SliceReaderWorker fails to open."""
+        self._reader_workers.pop(sid, None)
+        logger.warning(f"RemoteSliceReader failed for z{sid:02d}: {msg}")
+        self._cs_loading_label.setText(f"<span style='color:red;'>Reader failed for z{sid:02d}</span>")
+
+    def _request_cross_section(self, sid: int, axis: str, pos: int) -> None:
+        """Fetch one cross-section image, using cache if available."""
+        cached = self._cs_cache.get(sid, {}).get(axis, {}).get(pos)
+        if cached is not None:
+            self._refresh_cross_section()
+            return
+        reader = self._readers.get(sid)
+        if reader is None:
+            return
+        worker = CrossSectionWorker(reader, axis, pos)
+        worker.finished.connect(self._on_cross_section_ready)
+        worker.failed.connect(self._on_cross_section_failed)
+        self._cs_workers.append(worker)
+        worker.finished.connect(lambda *_: self._cs_workers.remove(worker) if worker in self._cs_workers else None)
+        worker.start()
+
+    def _on_cross_section_ready(self, sid: int, axis: str, pos: int, img: object) -> None:
+        """Cache the fetched cross-section and refresh the display if it matches the current view."""
+        img_arr = np.asarray(img)
+        self._cs_cache.setdefault(sid, {}).setdefault(axis, {})[pos] = img_arr
+
+        if not self.pairs:
+            return
+        fid, mid = self.pairs[self.current_pair_idx]
+        if sid not in (fid, mid):
+            return
+        if self._projection_mode != axis:
+            return
+
+        # Enable the appropriate slider now that we have real data
+        if axis == "xz":
+            self.slider_cs_y.setEnabled(True)
+        else:
+            self.slider_cs_x.setEnabled(True)
+
+        self._refresh_cross_section()
+
+    def _on_cross_section_failed(self, sid: int, axis: str, pos: int, msg: str) -> None:
+        logger.warning(f"Cross-section fetch failed z{sid:02d} {axis}[{pos}]: {msg}")
+
+    def _refresh_cross_section(self) -> None:
+        """Update layer data from the cache for the current pair and position."""
+        if not self.pairs or self._projection_mode == "xy":
+            return
+        fid, mid = self.pairs[self.current_pair_idx]
+        axis = self._projection_mode
+        pos = self._cross_section_y if axis == "xz" else self._cross_section_x
+        for sid, layer in ((fid, self.fixed_layer), (mid, self.moving_layer)):
+            img = self._cs_cache.get(sid, {}).get(axis, {}).get(pos)
+            if img is not None and layer is not None:
+                layer.data = normalize_aip(img.astype(np.float32))
+
+    def _on_cs_slider_settled(self) -> None:
+        """Called after the debounce timer fires — fetch both slices at the new position."""
+        if not self.pairs or self._projection_mode == "xy":
+            return
+        fid, mid = self.pairs[self.current_pair_idx]
+        axis = self._projection_mode
+        pos = self._cross_section_y if axis == "xz" else self._cross_section_x
+        self._request_cross_section(fid, axis, pos)
+        self._request_cross_section(mid, axis, pos)
+        # Kick off prefetch (handled in widget-prefetch step)
+        self._prefetch_around(fid, axis, pos)
+        self._prefetch_around(mid, axis, pos)
+
+    def _prefetch_around(self, sid: int, axis: str, pos: int) -> None:
+        """Pre-fetch cross-sections at ±5 steps around *pos* for *sid*.
+
+        Steps: ±10, ±20, ±30, ±40, ±50 pixels from current position.
+        Also evicts entries for positions outside [pos-15*10, pos+15*10] to keep
+        the local in-memory cache bounded to ~30 images per slice per axis.
+        """
+        reader = self._readers.get(sid)
+        if reader is None:
+            return
+
+        max_pos = reader.shape[2] if axis == "yz" else reader.shape[1]
+        step = 10
+        prefetch_offsets = [step * i for i in range(1, 6)]  # 10, 20, 30, 40, 50
+
+        for offset in prefetch_offsets:
+            for candidate in (pos + offset, pos - offset):
+                if 0 <= candidate < max_pos and self._cs_cache.get(sid, {}).get(axis, {}).get(candidate) is None:
+                    self._request_cross_section(sid, axis, candidate)
+
+        # Evict positions outside ±15 steps (±150 px)
+        evict_radius = 15 * step
+        axis_cache = self._cs_cache.get(sid, {}).get(axis, {})
+        if axis_cache:
+            for cached_pos in list(axis_cache.keys()):
+                if abs(cached_pos - pos) > evict_radius:
+                    del axis_cache[cached_pos]
+
+    def _nudge_cs_position(self, delta: int) -> None:
+        """Shift the active cross-section slider by *delta* pixels."""
+        if self._projection_mode == "xz":
+            new_val = max(0, min(self.slider_cs_y.maximum(), self._cross_section_y + delta))
+            self.slider_cs_y.setValue(new_val)
+        elif self._projection_mode == "yz":
+            new_val = max(0, min(self.slider_cs_x.maximum(), self._cross_section_x + delta))
+            self.slider_cs_x.setValue(new_val)
 
     # ----- Navigation -----
 
@@ -1476,6 +1763,23 @@ class ManualAlignWidget(QWidget):
         self._apply_state(state, push=True)
         self._update_status()
 
+    def closeEvent(self, event: object) -> None:
+        """Terminate all persistent SSH readers on widget close."""
+        for reader in list(self._readers.values()):
+            reader.close()
+        self._readers.clear()
+        for w in list(self._reader_workers.values()):
+            with contextlib.suppress(Exception):
+                w.quit()
+                w.wait(2000)
+        self._reader_workers.clear()
+        for w in list(self._cs_workers):
+            with contextlib.suppress(Exception):
+                w.quit()
+                w.wait(2000)
+        self._cs_workers.clear()
+        super().closeEvent(event)  # type: ignore[arg-type]
+
     # ----- Close guard -----
 
     def _install_close_guard(self) -> None:
@@ -1591,8 +1895,32 @@ class ManualAlignWidget(QWidget):
                 self.existing_transforms = discover_transforms(tfm_candidate)
                 break
 
+        # Load remote zarr metadata for interactive cross-section mode
+        self._load_remote_cs_metadata(aips_dir.parent)
+
         self._refresh_saved_pairs()
         self._rebuild_pairs()
+
+    def _load_remote_cs_metadata(self, pkg_root: Path) -> None:
+        """Read slices_remote_dir and cross_section_level from package metadata."""
+        import json
+
+        for candidate in (
+            pkg_root / "manual_align_metadata.json",
+            pkg_root.parent / "manual_align_metadata.json",
+        ):
+            if candidate.exists():
+                try:
+                    meta = json.loads(candidate.read_text())
+                    self._slices_remote_dir = meta.get("slices_remote_dir")
+                    self._cs_level = int(meta.get("cross_section_level", meta.get("pyramid_level", 0)))
+                    if self._slices_remote_dir:
+                        logger.info(
+                            f"Interactive XZ/YZ enabled: remote zarr at {self._slices_remote_dir} level {self._cs_level}"
+                        )
+                except Exception as exc:
+                    logger.warning(f"Could not read package metadata: {exc}")
+                break
 
     def _on_host_changed(self, text: str) -> None:
         """Update server config host when the user edits the host field."""
