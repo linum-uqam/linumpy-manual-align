@@ -1154,12 +1154,12 @@ class ManualAlignWidget(QWidget):
     # ----- Interactive XZ/YZ cross-section (remote OME-Zarr) -----
 
     def _update_initial_cs_position(self, fid: int, mid: int) -> None:
-        """Estimate tissue centroid from the static NPZ cross-section for this pair.
+        """Load the tissue centroid column from the static NPZ for this pair.
 
-        The static NPZ was generated at the tissue centroid column during export.
-        We use the intensity-weighted mean of the current cross-section image to
-        get a rough position estimate so the first remote fetch lands on tissue.
-        Resets to 0 if no static image is available.
+        The export script stores the Y (XZ) or X (YZ) index at which the
+        cross-section was taken as ``center_pos``.  We use that as the initial
+        slider position so the first remote fetch lands on tissue.
+        Falls back to 0 (letting _on_reader_ready use ny//2) when absent.
         """
         pair_key = (fid, mid)
         axis = self._projection_mode  # "xz" or "yz"
@@ -1172,26 +1172,22 @@ class ManualAlignWidget(QWidget):
         elif fid in per_slice_store:
             npz_path = per_slice_store[fid]
 
+        # Reset so _on_reader_ready falls back to ny//2 if center_pos is absent
+        self._cross_section_y = 0
+        self._cross_section_x = 0
+
         if npz_path is None:
-            self._cross_section_y = 0
-            self._cross_section_x = 0
             return
 
         try:
             data = np.load(str(npz_path))
-            img = data["aip"].astype(np.float32)
-            # img shape: (Z, lateral) where lateral = X for XZ, Y for YZ.
-            # The static NPZ was taken at the tissue centroid column of the *other*
-            # axis.  We can't recover that directly, so default to the middle of
-            # the remote volume — handled by _on_reader_ready.
-            # What we CAN recover: the lateral dimension size helps us set a sane
-            # initial guess before the reader is open.
-            lateral_size = img.shape[1] if img.ndim == 2 else img.shape[-1]
-            mid_pos = lateral_size // 2
+            if "center_pos" not in data:
+                return
+            cp = int(data["center_pos"])
             if axis == "xz":
-                self._cross_section_y = mid_pos
+                self._cross_section_y = cp
             else:
-                self._cross_section_x = mid_pos
+                self._cross_section_x = cp
         except Exception:
             pass
 
