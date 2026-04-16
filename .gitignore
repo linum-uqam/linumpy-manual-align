@@ -4,3 +4,8 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+
+# Local / personal secrets (QSettings already lives outside the repo; this catches stray exports)
+.env.local
+*.local.toml
+linumpy_manual_align_local.*

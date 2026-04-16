@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "linumpy-manual-align"
 version = "0.1.0"
-description = "Interactive napari tool for manual slice alignment correction in linumpy serial histology pipelines"
+description = "CLI application (napari viewer) for manual slice alignment correction in linumpy serial histology pipelines"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.12"
@@ -60,10 +60,26 @@ select = ["E", "F", "W", "I", "UP", "B", "RUF", "SIM", "C4", "PIE", "PTH"]
 [tool.ruff.lint.isort]
 known-first-party = ["linumpy_manual_align"]
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+# SimpleITK (SWIG) and transitive pydantic deprecations are noisy but outside this repo.
+filterwarnings = [
+    "ignore:builtin type SwigPyPacked has no __module__ attribute:DeprecationWarning",
+    "ignore:builtin type SwigPyObject has no __module__ attribute:DeprecationWarning",
+    "ignore:builtin type swigvarlink has no __module__ attribute:DeprecationWarning",
+    "ignore:.*json_encoders.*:pydantic.warnings.PydanticDeprecatedSince20",
+]
+
 [tool.ruff.format]
 # Use default (black-compatible) formatting
 
 # --- ty ---
+[tool.ty.src]
+# cs_server.py is a standalone server-side script uploaded via SSH; it imports
+# linumpy which is not a local dependency and must not be type-checked here.
+exclude = ["src/linumpy_manual_align/remote/cs_server.py"]
+
 [tool.ty.environment]
 python-version = "3.12"
 extra-paths = ["src"]
@@ -72,4 +88,5 @@ extra-paths = ["src"]
 possibly-unresolved-reference = "error"
 
 [tool.ty.analysis]
-replace-imports-with-any = ["napari.**", "numpy.**", "scipy.**", "SimpleITK.**", "qtpy.**", "ome_zarr.**"]
+# Prefer real typings for numpy/scipy/SimpleITK in app code; keep Any only for UI/napari boundaries.
+replace-imports-with-any = ["napari.**", "qtpy.**", "ome_zarr.**"]
