@@ -1,14 +1,17 @@
-# Napari Manual Align Plugin Guide
+# Linumpy Manual Align — CLI and Nextflow workflow
 
-This guide covers the full workflow for the `linumpy-manual-align` interactive
-Napari tool: exporting a data package from the server, correcting slice
-alignment, and uploading results back to the pipeline.
+This guide covers the full workflow for the `linumpy-manual-align` command-line
+application (it launches napari as the viewer): exporting a data package from
+the server, correcting slice alignment, and uploading results back to the pipeline.
+
+This is **not** a napari-hub / plugin-manager package — install it with `pip`/`uv`
+and run the `linumpy-manual-align` console script.
 
 ---
 
-## What the Plugin Does
+## What the tool does
 
-For each consecutive slice pair the plugin:
+For each consecutive slice pair the application:
 
 1. Loads pre-computed AIP projections (XY) and center cross-sections (XZ, YZ).
 2. Displays them as interactive overlays for lateral (XY) and depth (Z) alignment.
@@ -256,17 +259,17 @@ One `slice_z##/` folder per corrected pair, each containing `transform.tfm`,
 
 ## Code Architecture (for contributors)
 
-The package is split into focused modules:
+The package is split into `io/`, `ui/`, and `remote/` subpackages (plus `settings.py`, `state.py`, `api.py` at the top level):
 
-| Module | Responsibility |
-|--------|---------------|
-| `widget.py` | Main napari dock widget — thin coordinator that wires all modules together |
-| `ui_builder.py` | Qt widget construction helpers; each `build_*` function returns a `SimpleNamespace` of named child widgets so the widget can assign them as attributes without owning the construction logic |
-| `cross_section.py` | `CrossSectionManager` — a `QObject` that owns remote OME-Zarr reader lifecycle, cross-section image cache, and prefetch; emits `reader_ready`, `cross_section_ready` signals |
-| `image_utils.py` | Pure numpy/scipy image functions: `normalize_aip`, `enhance_aip`, `apply_transform`, `build_overlay`, `content_bbox` — no Qt/napari dependencies |
-| `transform_io.py` | SimpleITK `.tfm` save/load; AIP/pair-AIP NPZ discovery (`discover_aips`, `discover_pair_aips`); pairwise metrics I/O; shared `_SLICE_PATTERN` regex |
-| `server_transfer.py` | SCP/SSH background workers (`ScpWorker`, `SliceReaderWorker`, `CrossSectionWorker`), `RemoteSliceReader`, and `parse_server_config` |
-| `omezarr_io.py` | Optional: load AIP directly from an OME-Zarr pyramid (requires the `zarr` extra) |
+| Location | Responsibility |
+|----------|----------------|
+| `ui/widget.py` | Main napari dock widget — coordinates I/O, remote, and settings |
+| `ui/ui_builder.py` | Qt widget construction helpers; each `build_*` function returns a `SimpleNamespace` of named child widgets |
+| `remote/cross_section.py` | `CrossSectionManager` — remote OME-Zarr reader lifecycle, cross-section cache, prefetch; signals for `reader_ready`, `cross_section_ready` |
+| `io/image_utils.py` | Pure numpy/scipy image functions — no Qt/napari dependencies |
+| `io/transform_io.py` | SimpleITK `.tfm` save/load; AIP/pair-AIP NPZ discovery; pairwise metrics I/O |
+| `remote/__init__.py` | Package API: SCP workers, `RemoteSliceReader`, `parse_server_config` (implementation in `remote/*.py`) |
+| `io/omezarr_io.py` | Optional: load AIP from an OME-Zarr pyramid (requires the `zarr` extra) |
 | `state.py` | `AlignmentState` dataclass and bounded `UndoStack` |
 
 ### Running tests

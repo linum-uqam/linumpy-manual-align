@@ -2,12 +2,12 @@
 
 [![CI](https://github.com/linum-uqam/linumpy-manual-align/actions/workflows/ci.yml/badge.svg)](https://github.com/linum-uqam/linumpy-manual-align/actions/workflows/ci.yml)
 
-Napari-based interactive tool for manually correcting pairwise slice alignment
-in the [linumpy](https://github.com/linum-uqam/linumpy) reconstruction pipeline.
+**Command-line application** that launches [napari](https://napari.org) for manually correcting pairwise slice alignment
+in the [linumpy](https://github.com/linum-uqam/linumpy) reconstruction pipeline. It is distributed as a normal Python package with a CLI entry point, not as an installable napari-plugin-manager plugin.
 
 ## Documentation
 
-- [Napari plugin + Nextflow integration guide](docs/napari-plugin-nextflow-guide.md)
+- [CLI + Nextflow integration guide](docs/cli-nextflow-guide.md)
 
 ## Installation
 
@@ -112,20 +112,78 @@ Overlay and enhancement modes are independent and can be combined freely.
 | `S` | Save current pair |
 | Ctrl+Z / Ctrl+Shift+Z | Undo / Redo |
 
+## Settings
+
+A **Settings** dialog lets you adjust behavioural parameters without editing code.
+
+Open it via:
+- The small **gear button** (⚙) at the right end of the slice-pair navigation row, or
+- **Plugins → Manual Align Settings…** in napari’s menu bar (the built-in Plugins menu, not a separate plugin install).
+
+The dialog is modeless — it stays open while you continue working. Changes take effect immediately after clicking **Apply** or **OK**.
+
+### Configurable parameters
+
+| Tab | Parameter | Default | Description |
+|-----|-----------|---------|-------------|
+| Shortcuts | Translation fine step | 1 px | Arrow key nudge |
+| Shortcuts | Translation coarse step | 10 px | Alt+Arrow nudge |
+| Shortcuts | Translation large step | 50 px | Shift+Arrow nudge |
+| Shortcuts | Rotation fine step | 0.1° | `[`/`]` key nudge |
+| Shortcuts | Rotation coarse step | 1.0° | Alt+`[`/`]` nudge |
+| Shortcuts | Rotation large step | 5.0° | Ctrl+`[`/`]` nudge |
+| Shortcuts | Cross-section nudge | 10 px | Alt+`,`/`.` , moving Y/X sliders, and prefetch spacing along the axis |
+| Cross-section | Prefetch steps | 5 | Positions pre-fetched on each side of current |
+| Cross-section | Evict radius multiplier | 15 | Evict radius = multiplier × cross-section nudge (px) |
+| Spinboxes | TX / TY step | 1.0 px | Spinbox single-step increment |
+| Spinboxes | Rotation step | 0.1° | Spinbox single-step increment |
+| Spinboxes | Checkerboard tile step | 4 | Spinbox single-step increment |
+| Server | Default host | *(empty)* | Set your SSH host here or in the dock; not stored in git |
+| Server | Remote Python path | *(empty)* | Remote interpreter for the zarr reader; not stored in git |
+
+### Where settings are stored
+
+Settings are persisted using Qt's native preferences mechanism (on **your machine only** — nothing under this repository). They survive reinstalls of the package:
+
+| OS | Location |
+|----|----------|
+| macOS | `~/Library/Preferences/com.linum-uqam.linumpy-manual-align.plist` |
+| Linux | `~/.config/linum-uqam/linumpy-manual-align.conf` |
+| Windows | Registry: `HKCU\Software\linum-uqam\linumpy-manual-align` |
+
+Clicking **Reset All Defaults** in the dialog removes all stored overrides.
+
 ## Architecture
 
-The package is split into focused modules to keep each one small and testable:
+The package uses subpackages under `linumpy_manual_align/`. The napari dock UI is split into mixins under `ui/`; `ManualAlignWidget` in `ui/widget.py` subclasses them in a fixed MRO order and runs `build_manual_align_ui()` from `ui/widget_build.py`. Mixin methods annotate `self` via `ui/widget_typing.py` (one import) so type checkers see the full widget type without repeating `TYPE_CHECKING` blocks.
 
-| Module | Responsibility |
-|--------|---------------|
-| `widget.py` | Main napari dock widget — coordinates all modules |
-| `ui_builder.py` | Qt widget construction helpers (returns named-widget namespaces) |
-| `cross_section.py` | `CrossSectionManager`: remote OME-Zarr reader lifecycle, cross-section cache, prefetch |
-| `image_utils.py` | Pure image processing: normalize, enhance, overlay compositing, transform application |
-| `transform_io.py` | SimpleITK `.tfm` save/load, AIP/pair-AIP discovery, pairwise metrics I/O |
-| `server_transfer.py` | SCP/SSH download/upload workers, remote slice reader |
-| `omezarr_io.py` | Optional: load AIP directly from an OME-Zarr pyramid |
+| Location | Responsibility |
+|----------|----------------|
+| `ui/widget.py` | `ManualAlignWidget` — thin class combining mixins and `__init__` |
+| `ui/widget_typing.py` | Re-exports `ManualAlignWidget` for mixin `self:` annotations only |
+| `ui/widget_build.py` | `build_manual_align_ui()` — dock layout and signal wiring |
+| `ui/widget_mixins.py` | `PairNavigationMixin`, `_PairNavHost` protocol for pair list / prev-next |
+| `ui/widget_pair_loading.py` | AIP discovery and loading pairs into napari |
+| `ui/widget_overlay.py` | Overlay compositing, `_apply_state` / `_current_state` |
+| `ui/widget_projection.py` | Pair combo, spinboxes, projection mode, Z-offset handlers |
+| `ui/widget_cross_section.py` | Remote XZ/YZ cross-sections and slider logic |
+| `ui/widget_server.py` | SCP download/upload, server config, host sync |
+| `ui/widget_undo_save.py` | Undo/redo, automated load, reset, save |
+| `ui/widget_status.py` | Status label and “saved” flash |
+| `ui/widget_interaction.py` | Keybindings, nudges, display toggles, `closeEvent` |
+| `ui/widget_close_guard.py` | Unsaved-changes guard on main window close |
+| `ui/widget_ui.py` | Small helpers (event suppression, CS slider visibility) |
+| `ui/widget_settings_ui.py` | Settings dialog entry, hints, CS slider steps |
+| `ui/ui_builder.py` | Qt widget construction helpers (returns named-widget namespaces) |
+| `ui/settings_dialog.py` | Modeless `SettingsDialog` (tabbed form, Apply/OK/Cancel/Reset All) |
+| `io/image_utils.py` | Pure image processing: normalize, enhance, overlay compositing, transform application |
+| `io/transform_io.py` | SimpleITK `.tfm` save/load, AIP/pair-AIP discovery, pairwise metrics I/O |
+| `io/omezarr_io.py` | Optional: load AIP directly from an OME-Zarr pyramid |
+| `remote/cross_section.py` | `CrossSectionManager`: remote OME-Zarr reader lifecycle, cross-section cache, prefetch |
+| `remote/__init__.py` | Re-exports SCP/SSH helpers, workers, and config parsing |
+| `settings.py` | `AppSettings` singleton backed by `QSettings`; `DEFAULTS` dict |
 | `state.py` | `AlignmentState` dataclass, bounded `UndoStack` |
+| `api.py` | `create_manual_align_widget` for embedding the dock in an existing viewer |
 
 ## Development
 
@@ -142,7 +200,7 @@ uv run ruff check src/ tests/ && uv run ruff format --check src/ tests/
 # Type check (library only)
 uv run ty check src/
 
-# Run all tests
+# Run all tests (known third-party deprecations are filtered in pyproject — see [tool.pytest.ini_options])
 uv run pytest tests/ -v
 
 # Run a specific test module
