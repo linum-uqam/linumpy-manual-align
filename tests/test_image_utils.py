@@ -9,7 +9,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from linumpy_manual_align.image_utils import (
+from linumpy_manual_align.io.image_utils import (
     ENHANCE_CLAHE,
     ENHANCE_EDGES,
     ENHANCE_NONE,

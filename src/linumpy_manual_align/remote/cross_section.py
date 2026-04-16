@@ -21,23 +21,18 @@ import logging
 from pathlib import Path
 
 import numpy as np
-from qtpy.QtCore import QObject, Signal
+from qtpy.QtCore import QObject, Qt, Signal
 
-from linumpy_manual_align.server_transfer import (
+from linumpy_manual_align.remote import (
     CrossSectionWorker,
     RemoteSliceReader,
     ServerConfig,
     SliceReaderWorker,
 )
+from linumpy_manual_align.settings import settings
+from linumpy_manual_align.settings_runtime import cross_section_nudge_px
 
 logger = logging.getLogger(__name__)
-
-# Number of positions to pre-fetch on each side of the current position.
-_PREFETCH_STEPS = 5
-# Step size in volume pixels between pre-fetched positions.
-_PREFETCH_STEP_SIZE = 10
-# Maximum cached positions per (slice, axis) before eviction.
-_CACHE_EVICT_RADIUS = 15 * _PREFETCH_STEP_SIZE  # ±150 px
 
 
 class CrossSectionManager(QObject):
@@ -124,8 +119,15 @@ class CrossSectionManager(QObject):
         zarr_name = self.slice_filenames.get(slice_id, f"slice_z{slice_id:02d}.ome.zarr")
         remote_path = f"{self.slices_remote_dir}/{zarr_name}"
         worker = SliceReaderWorker(server_config, slice_id, remote_path, self.cs_level)
-        worker.ready.connect(self._handle_reader_ready)
-        worker.failed.connect(self._handle_reader_failed)
+        # QueuedConnection: slots are delivered on the main-thread event loop,
+        # i.e. only after run() has returned and the thread is truly done.
+        # This prevents the worker from being destroyed while its thread is
+        # still executing (DirectConnection would call the slot synchronously
+        # from the worker thread, allowing GC to run the destructor mid-run).
+        worker.ready.connect(self._handle_reader_ready, Qt.QueuedConnection)
+        worker.failed.connect(self._handle_reader_failed, Qt.QueuedConnection)
+        # Keep the Python wrapper alive until after the thread finishes.
+        worker.finished.connect(lambda sid=slice_id: self._reader_workers.pop(sid, None), Qt.QueuedConnection)
         self._reader_workers[slice_id] = worker
         worker.start()
 
@@ -166,25 +168,35 @@ class CrossSectionManager(QObject):
         if reader is None:
             return
         worker = CrossSectionWorker(reader, axis, pos)
-        worker.finished.connect(self._handle_cs_ready)
-        worker.failed.connect(self._handle_cs_failed)
+        worker.result.connect(self._handle_cs_ready, Qt.QueuedConnection)
+        worker.failed.connect(self._handle_cs_failed, Qt.QueuedConnection)
         self._cs_workers.append(worker)
-        worker.finished.connect(lambda *_: self._cs_workers.remove(worker) if worker in self._cs_workers else None)
+        # Use QThread's built-in finished (fires after run() returns) to remove
+        # the worker safely — QueuedConnection ensures the slot runs on the
+        # main thread only after the thread has fully exited.
+        worker.finished.connect(
+            lambda w=worker: self._cs_workers.remove(w) if w in self._cs_workers else None,
+            Qt.QueuedConnection,
+        )
         worker.start()
 
     def prefetch_around(self, slice_id: int, axis: str, pos: int) -> None:
         """Pre-fetch cross-sections at ±steps around *pos* and evict stale entries.
 
-        Spawns up to ``_PREFETCH_STEPS * 2`` workers for positions not yet
-        cached.  Also evicts cache entries further than ``_CACHE_EVICT_RADIUS``
-        pixels from *pos* to keep per-(slice, axis) memory bounded.
+        The number of prefetch steps, step size, and evict radius multiplier are
+        read from the user-configurable :data:`settings` singleton so they take
+        effect live without restarting the plugin.
         """
         reader = self._readers.get(slice_id)
         if reader is None:
             return
+        prefetch_steps = int(settings.get("prefetch/steps"))
+        # Same pixel step as Alt+,/. and the moving cross-section sliders (Shortcuts tab).
+        step_size = cross_section_nudge_px()
+        evict_radius = int(settings.get("prefetch/evict_radius_multiplier")) * step_size
         max_pos = reader.shape[2] if axis == "yz" else reader.shape[1]
-        for i in range(1, _PREFETCH_STEPS + 1):
-            offset = i * _PREFETCH_STEP_SIZE
+        for i in range(1, prefetch_steps + 1):
+            offset = i * step_size
             for candidate in (pos + offset, pos - offset):
                 if 0 <= candidate < max_pos and self.get_cached(slice_id, axis, candidate) is None:
                     self.request(slice_id, axis, candidate)
@@ -193,7 +205,7 @@ class CrossSectionManager(QObject):
         axis_cache = self._cache.get(slice_id, {}).get(axis, {})
         if axis_cache:
             for cached_pos in list(axis_cache.keys()):
-                if abs(cached_pos - pos) > _CACHE_EVICT_RADIUS:
+                if abs(cached_pos - pos) > evict_radius:
                     del axis_cache[cached_pos]
 
     # ------------------------------------------------------------------
@@ -221,7 +233,8 @@ class CrossSectionManager(QObject):
     # ------------------------------------------------------------------
 
     def _handle_reader_ready(self, slice_id: int, reader: RemoteSliceReader) -> None:
-        self._reader_workers.pop(slice_id, None)
+        # Do NOT pop _reader_workers here — the QThread.finished lambda handles
+        # that after run() has returned, so the worker is never destroyed mid-thread.
         self._readers[slice_id] = reader
         self.reader_ready.emit(slice_id, reader)
 

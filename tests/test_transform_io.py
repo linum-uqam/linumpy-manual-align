@@ -8,7 +8,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from linumpy_manual_align.transform_io import (
+from linumpy_manual_align.io.transform_io import (
     discover_aips,
     discover_pair_aips,
     discover_slices,

@@ -1,10 +1,16 @@
-"""Tests for server_transfer module: config parsing."""
+"""Tests for :mod:`linumpy_manual_align.remote` (config parsing and remote script loading)."""
 
 from __future__ import annotations
 
+from importlib import resources
 from pathlib import Path
 
-from linumpy_manual_align.server_transfer import ServerConfig, parse_server_config
+import linumpy_manual_align
+from linumpy_manual_align.remote import (
+    ServerConfig,
+    _cs_server_script,
+    parse_server_config,
+)
 
 
 class TestParseServerConfig:
@@ -17,7 +23,7 @@ class TestParseServerConfig:
         cfg = parse_server_config(config_path)
         assert cfg is not None
         assert cfg.subject_id == "sub-22"
-        assert cfg.host == "132.207.157.41"
+        assert cfg.host == ""
         assert cfg.remote_output == "/scratch/workspace/sub-22/output"
         assert cfg.config_path == config_path
 
@@ -63,3 +69,29 @@ class TestServerConfig:
         assert cfg.host == "example.com"
         assert cfg.remote_output == "/data/output"
         assert cfg.subject_id == "sub-01"
+
+
+class TestCsServerScript:
+    """``_cs_server_script`` must work from editable installs, wheels, and source trees."""
+
+    def test_loads_via_importlib_resources(self) -> None:
+        """The script must be loadable as a package resource (non-editable wheel installs)."""
+        script_path = resources.files("linumpy_manual_align").joinpath("remote", "cs_server.py")
+        text = script_path.read_text(encoding="utf-8")
+        assert len(text) > 100
+        assert "read_omezarr" in text
+        assert "ready " in text
+        assert "for line in sys.stdin" in text
+
+    def test_cs_server_script_matches_package_cs_server_py(self) -> None:
+        """``_cs_server_script()`` must match the on-disk ``cs_server.py`` next to the package."""
+        pkg_dir = Path(linumpy_manual_align.__file__).resolve().parent
+        direct = (pkg_dir / "remote" / "cs_server.py").read_text(encoding="utf-8")
+        assert _cs_server_script() == direct
+
+    def test_cs_server_script_is_stable_marker_content(self) -> None:
+        """Sanity check that the loader returns the expected remote protocol, not an empty string."""
+        s = _cs_server_script()
+        assert s.startswith('"""')
+        assert "linumpy.io.zarr" in s
+        assert "base64.b64encode" in s

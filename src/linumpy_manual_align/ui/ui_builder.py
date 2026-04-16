@@ -16,6 +16,7 @@ import types
 from collections.abc import Callable
 
 from qtpy.QtCore import Qt
+from qtpy.QtGui import QIcon
 from qtpy.QtWidgets import (
     QButtonGroup,
     QComboBox,
@@ -30,8 +31,18 @@ from qtpy.QtWidgets import (
     QScrollArea,
     QSlider,
     QSpinBox,
+    QToolButton,
     QVBoxLayout,
     QWidget,
+)
+
+from linumpy_manual_align.settings_runtime import (
+    apply_cross_section_slider_steps,
+    default_host_display,
+    spin_step_rot,
+    spin_step_tile,
+    spin_step_tx_ty,
+    xy_page_keyboard_hint_html,
 )
 
 _IS_MACOS = sys.platform == "darwin"
@@ -73,7 +84,7 @@ def build_navigation_row(
     """Build the slice-pair navigation row.
 
     Returns ``(layout, widgets)`` where *widgets* has attributes
-    ``btn_prev``, ``btn_next``, ``pair_combo``.
+    ``btn_prev``, ``btn_next``, ``pair_combo``, ``btn_settings``.
     """
     row = QHBoxLayout()
     row.setSpacing(4)
@@ -92,7 +103,26 @@ def build_navigation_row(
     btn_next.clicked.connect(on_next)
     row.addWidget(btn_next)
 
-    return row, types.SimpleNamespace(btn_prev=btn_prev, btn_next=btn_next, pair_combo=pair_combo)
+    btn_settings = QToolButton()
+    btn_settings.setToolTip("Settings…")
+    btn_settings.setFixedSize(22, 22)
+    # Prefer the freedesktop "preferences" icon (Linux); macOS/Windows often have no theme icon.
+    _pref_icon = QIcon.fromTheme("preferences-system")
+    if _pref_icon.isNull():
+        _pref_icon = QIcon.fromTheme("preferences-desktop")
+    if _pref_icon.isNull():
+        btn_settings.setText("\u2699")  # gear
+        btn_settings.setToolButtonStyle(Qt.ToolButtonTextOnly)
+    else:
+        btn_settings.setIcon(_pref_icon)
+    row.addWidget(btn_settings)
+
+    return row, types.SimpleNamespace(
+        btn_prev=btn_prev,
+        btn_next=btn_next,
+        pair_combo=pair_combo,
+        btn_settings=btn_settings,
+    )
 
 
 def build_mode_row(
@@ -105,7 +135,6 @@ def build_mode_row(
     Returns ``(layout, widgets)`` where *widgets* has ``btn_mode_xy``, ``btn_mode_z``.
     """
     row = QHBoxLayout()
-    row.setSpacing(0)
 
     btn_xy = QPushButton("XY Alignment")
     btn_xy.setCheckable(True)
@@ -153,7 +182,7 @@ def build_xy_page(
     spin_tx = QDoubleSpinBox()
     spin_tx.setRange(-2000, 2000)
     spin_tx.setDecimals(1)
-    spin_tx.setSingleStep(1.0)
+    spin_tx.setSingleStep(spin_step_tx_ty())
     spin_tx.setSuffix(" px")
     spin_tx.valueChanged.connect(on_spinbox_changed)
     form.addRow("TX:", spin_tx)
@@ -161,7 +190,7 @@ def build_xy_page(
     spin_ty = QDoubleSpinBox()
     spin_ty.setRange(-2000, 2000)
     spin_ty.setDecimals(1)
-    spin_ty.setSingleStep(1.0)
+    spin_ty.setSingleStep(spin_step_tx_ty())
     spin_ty.setSuffix(" px")
     spin_ty.valueChanged.connect(on_spinbox_changed)
     form.addRow("TY:", spin_ty)
@@ -169,7 +198,7 @@ def build_xy_page(
     spin_rot = QDoubleSpinBox()
     spin_rot.setRange(-180, 180)
     spin_rot.setDecimals(2)
-    spin_rot.setSingleStep(0.1)
+    spin_rot.setSingleStep(spin_step_rot())
     spin_rot.setSuffix("°")
     spin_rot.valueChanged.connect(on_rotation_changed)
     form.addRow("Rotation:", spin_rot)
@@ -182,7 +211,7 @@ def build_xy_page(
 
     layout.addLayout(form)
 
-    hint = QLabel("<i style='color: grey;'>Arrow: 1px · Alt: 10px · Ctrl: 50px · [/]: 0.1° · Alt[/]: 1° · Ctrl[/]: 5°</i>")
+    hint = QLabel(xy_page_keyboard_hint_html())
     hint.setWordWrap(True)
     layout.addWidget(hint)
 
@@ -227,7 +256,9 @@ def build_z_page(
     Returns ``(page_widget, widgets)`` where *widgets* has
     ``btn_proj_xz``, ``btn_proj_yz``, ``proj_btn_group``,
     ``spin_fixed_z``, ``spin_moving_z``, ``z_relative_label``,
+    ``slider_fixed_y``, ``lbl_fixed_y``, ``fixed_y_form_row_label``,
     ``slider_cs_y``, ``lbl_cs_y``, ``cs_y_form_row_label``,
+    ``slider_fixed_x``, ``lbl_fixed_x``, ``fixed_x_form_row_label``,
     ``slider_cs_x``, ``lbl_cs_x``, ``cs_x_form_row_label``,
     ``cs_loading_label``.
     """
@@ -279,12 +310,28 @@ def build_z_page(
     form.addRow("", z_relative_label)
 
     # Interactive cross-section sliders (hidden until remote metadata is loaded)
+
+    # Fixed reference slider — read-only, shows where the static NPZ cross-section was taken
+    slider_fixed_y = QSlider(Qt.Horizontal)
+    slider_fixed_y.setMinimum(0)
+    slider_fixed_y.setMaximum(0)
+    slider_fixed_y.setValue(0)
+    slider_fixed_y.setEnabled(False)
+    slider_fixed_y.setToolTip("Fixed slice Y position — where the reference cross-section was extracted")
+    lbl_fixed_y = QLabel("—")
+    lbl_fixed_y.setFixedWidth(40)
+    fixed_y_row = QHBoxLayout()
+    fixed_y_row.setSpacing(4)
+    fixed_y_row.addWidget(slider_fixed_y)
+    fixed_y_row.addWidget(lbl_fixed_y)
+    fixed_y_form_row_label = QLabel("Fixed Y:")
+    form.addRow(fixed_y_form_row_label, fixed_y_row)
+
     slider_cs_y = QSlider(Qt.Horizontal)
     slider_cs_y.setMinimum(0)
     slider_cs_y.setMaximum(0)
     slider_cs_y.setValue(0)
     slider_cs_y.setEnabled(False)
-    slider_cs_y.setToolTip("Moving slice Y position — slide to find matching tissue  [Alt-, / Alt-.]")
     lbl_cs_y = QLabel("0")
     lbl_cs_y.setFixedWidth(40)
     cs_y_row = QHBoxLayout()
@@ -294,12 +341,27 @@ def build_z_page(
     cs_y_form_row_label = QLabel("Moving Y:")
     form.addRow(cs_y_form_row_label, cs_y_row)
 
+    # Fixed reference slider — X axis
+    slider_fixed_x = QSlider(Qt.Horizontal)
+    slider_fixed_x.setMinimum(0)
+    slider_fixed_x.setMaximum(0)
+    slider_fixed_x.setValue(0)
+    slider_fixed_x.setEnabled(False)
+    slider_fixed_x.setToolTip("Fixed slice X position — where the reference cross-section was extracted")
+    lbl_fixed_x = QLabel("—")
+    lbl_fixed_x.setFixedWidth(40)
+    fixed_x_row = QHBoxLayout()
+    fixed_x_row.setSpacing(4)
+    fixed_x_row.addWidget(slider_fixed_x)
+    fixed_x_row.addWidget(lbl_fixed_x)
+    fixed_x_form_row_label = QLabel("Fixed X:")
+    form.addRow(fixed_x_form_row_label, fixed_x_row)
+
     slider_cs_x = QSlider(Qt.Horizontal)
     slider_cs_x.setMinimum(0)
     slider_cs_x.setMaximum(0)
     slider_cs_x.setValue(0)
     slider_cs_x.setEnabled(False)
-    slider_cs_x.setToolTip("Moving slice X position — slide to find matching tissue  [Alt-, / Alt-.]")
     lbl_cs_x = QLabel("0")
     lbl_cs_x.setFixedWidth(40)
     cs_x_row = QHBoxLayout()
@@ -308,6 +370,8 @@ def build_z_page(
     cs_x_row.addWidget(lbl_cs_x)
     cs_x_form_row_label = QLabel("Moving X:")
     form.addRow(cs_x_form_row_label, cs_x_row)
+
+    apply_cross_section_slider_steps(slider_cs_y, slider_cs_x)
 
     cs_loading_label = QLabel("")
     cs_loading_label.setStyleSheet("color: grey; font-style: italic;")
@@ -326,9 +390,15 @@ def build_z_page(
         spin_fixed_z=spin_fixed_z,
         spin_moving_z=spin_moving_z,
         z_relative_label=z_relative_label,
+        slider_fixed_y=slider_fixed_y,
+        lbl_fixed_y=lbl_fixed_y,
+        fixed_y_form_row_label=fixed_y_form_row_label,
         slider_cs_y=slider_cs_y,
         lbl_cs_y=lbl_cs_y,
         cs_y_form_row_label=cs_y_form_row_label,
+        slider_fixed_x=slider_fixed_x,
+        lbl_fixed_x=lbl_fixed_x,
+        fixed_x_form_row_label=fixed_x_form_row_label,
         slider_cs_x=slider_cs_x,
         lbl_cs_x=lbl_cs_x,
         cs_x_form_row_label=cs_x_form_row_label,
@@ -377,7 +447,7 @@ def build_display_group(
     spin_tile = QSpinBox()
     spin_tile.setRange(2, 512)
     spin_tile.setValue(16)
-    spin_tile.setSingleStep(4)
+    spin_tile.setSingleStep(spin_step_tile())
     spin_tile.setToolTip("Checkerboard tile size (pixels at current pyramid level)")
     spin_tile.valueChanged.connect(on_tile_size_changed)
     form.addRow(tile_row_label, spin_tile)
@@ -439,7 +509,7 @@ def build_server_group(
 
     host_row = QHBoxLayout()
     host_row.addWidget(QLabel("Host:"))
-    host_edit = QLineEdit("132.207.157.41")
+    host_edit = QLineEdit(default_host_display())
     host_edit.setPlaceholderText("server hostname or IP")
     host_edit.textChanged.connect(on_host_changed)
     host_row.addWidget(host_edit, stretch=1)

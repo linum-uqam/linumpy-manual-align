@@ -7,7 +7,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from linumpy_manual_align.omezarr_io import load_aip_from_ome_zarr
+from linumpy_manual_align.io.omezarr_io import load_aip_from_ome_zarr
 
 
 def _create_minimal_ome_zarr(path: Path, data: np.ndarray, scale_zyx: list[float]) -> None:

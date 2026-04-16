@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import pytest
 
-from linumpy_manual_align.cross_section import CrossSectionManager
+from linumpy_manual_align.remote.cross_section import CrossSectionManager
 
 
 @pytest.fixture()
@@ -149,11 +149,12 @@ class TestReaderLifecycle:
         mgr._handle_reader_ready(0, reader)
         assert mgr.reader_shape(0) == (10, 200, 300)
 
-    def test_reader_ready_removes_worker(self, mgr: CrossSectionManager) -> None:
+    def test_reader_ready_does_not_pop_worker(self, mgr: CrossSectionManager) -> None:
+        """``_handle_reader_ready`` must not pop ``_reader_workers`` — ``QThread.finished`` does."""
         worker = MagicMock()
         mgr._reader_workers[5] = worker
         mgr._handle_reader_ready(5, MagicMock())
-        assert 5 not in mgr._reader_workers
+        assert 5 in mgr._reader_workers
 
     def test_reader_failed_removes_worker(self, mgr: CrossSectionManager) -> None:
         worker = MagicMock()
@@ -178,14 +179,14 @@ class TestReaderLifecycle:
         mgr._readers[0] = MagicMock()
         mgr.slices_remote_dir = "/remote"
         server_cfg = MagicMock()
-        with patch("linumpy_manual_align.cross_section.SliceReaderWorker") as MockW:
+        with patch("linumpy_manual_align.remote.cross_section.SliceReaderWorker") as MockW:
             mgr.ensure_reader(server_cfg, 0)
             MockW.assert_not_called()
 
     def test_ensure_reader_skips_if_no_remote_dir(self, mgr: CrossSectionManager) -> None:
         mgr.slices_remote_dir = None
         server_cfg = MagicMock()
-        with patch("linumpy_manual_align.cross_section.SliceReaderWorker") as MockW:
+        with patch("linumpy_manual_align.remote.cross_section.SliceReaderWorker") as MockW:
             mgr.ensure_reader(server_cfg, 0)
             MockW.assert_not_called()
 

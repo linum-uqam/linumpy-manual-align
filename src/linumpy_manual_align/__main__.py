@@ -28,6 +28,7 @@ step with ``-resume``.
 from __future__ import annotations
 
 import argparse
+import logging
 from pathlib import Path
 
 
@@ -82,11 +83,24 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Path to a local nextflow.config (e.g. ~/Downloads/sub-22/nextflow.config).\n"
         "Enables download/upload buttons in the UI for server interaction.",
     )
+    p.add_argument(
+        "--debug",
+        action="store_true",
+        default=False,
+        help="Enable DEBUG logging for linumpy_manual_align (useful for diagnosing slider issues).",
+    )
     return p.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
+
+    if args.debug:
+        logging.basicConfig(
+            level=logging.DEBUG,
+            format="%(asctime)s %(name)s %(levelname)s %(message)s",
+        )
+        logging.getLogger("linumpy_manual_align").setLevel(logging.DEBUG)
 
     # Resolve data package paths
     aips_dir = None
@@ -159,19 +173,25 @@ def main(argv: list[str] | None = None) -> None:
     # Import napari late — startup takes a moment
     import napari
 
-    from linumpy_manual_align.widget import ManualAlignWidget
+    from linumpy_manual_align.api import create_manual_align_widget
+    from linumpy_manual_align.remote import parse_server_config
+    from linumpy_manual_align.ui.napari_menus import add_manual_align_settings_action
 
     # Parse server config if provided
     server_config = None
     if args.server_config is not None:
-        from linumpy_manual_align.server_transfer import parse_server_config
+        from linumpy_manual_align.settings import settings
 
-        server_config = parse_server_config(args.server_config)
+        # Host is not in nextflow.config; use the same value as the dock (QSettings).
+        server_config = parse_server_config(
+            args.server_config,
+            host=str(settings.get("server/default_host")).strip(),
+        )
 
     viewer = napari.Viewer(title="Manual Slice Alignment")
 
-    widget = ManualAlignWidget(
-        viewer=viewer,
+    widget = create_manual_align_widget(
+        viewer,
         input_dir=args.input_dir,
         transforms_dir=args.transforms_dir,
         output_dir=args.output_dir,
@@ -182,7 +202,8 @@ def main(argv: list[str] | None = None) -> None:
         aips_yz_dir=aips_yz_dir,
         server_config=server_config,
     )
-    viewer.window.add_dock_widget(widget, name="Manual Align", area="right")
+
+    add_manual_align_settings_action(viewer, widget._open_settings_dialog)
 
     napari.run()
 
