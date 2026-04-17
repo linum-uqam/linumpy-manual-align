@@ -170,6 +170,14 @@ def main(argv: list[str] | None = None) -> None:
             # server-config-only startup — default output alongside the config file
             args.output_dir = Path(args.server_config).parent / "manual_transforms"
 
+    # Fix Qt settings scope before any code imports :data:`linumpy_manual_align.settings.settings`
+    # (the widget pulls it in via :mod:`linumpy_manual_align.api`). Without this, macOS
+    # can store QSettings in an inconsistent location relative to the Settings dialog.
+    from qtpy.QtCore import QCoreApplication
+
+    QCoreApplication.setOrganizationName("linum-uqam")
+    QCoreApplication.setApplicationName("linumpy-manual-align")
+
     # Import napari late — startup takes a moment
     import napari
 

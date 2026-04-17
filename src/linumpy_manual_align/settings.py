@@ -35,6 +35,7 @@ DEFAULTS: dict[str, int | float | str] = {
     "shortcuts/rotate_coarse_deg": 1.0,
     "shortcuts/rotate_large_deg": 5.0,
     "shortcuts/cs_nudge_px": 10,
+    "shortcuts/cs_nudge_fine_px": 1,
     # Cross-section prefetch / cache (spacing along the axis uses shortcuts/cs_nudge_px)
     "prefetch/steps": 5,
     # evict_radius = evict_radius_multiplier * cs_nudge_px
@@ -43,8 +44,9 @@ DEFAULTS: dict[str, int | float | str] = {
     "spin/tx_ty_step": 1.0,
     "spin/rot_step": 0.1,
     "spin/tile_step": 4,
-    # Server (empty in repo — values live only in each user's QSettings, not in git)
+    # Server (empty in repo — values live in each user's QSettings, not in git)
     "server/default_host": "",
+    # Must be set to the server's linumpy venv (zarr, ome-zarr, …); see remote/cs_script.
     "server/remote_python": "",
 }
 

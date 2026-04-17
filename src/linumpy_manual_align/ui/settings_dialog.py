@@ -147,21 +147,24 @@ def _build_shortcuts_tab(widgets: dict) -> QWidget:
         form2.addRow(*_row(label, key, spin))
     layout.addWidget(rot_group)
 
-    # Cross-section nudge group (keyboard Alt+,/. + moving slider single/page step)
+    # Cross-section nudge group (keyboard Alt+,/. + Ctrl+,/. + moving slider single/page step)
     cs_group = QGroupBox("Cross-section slider nudge")
     cs_group.setToolTip(
-        "Pixel step for Alt+, / Alt-., the Moving Y/X sliders, and prefetch spacing "
-        "along the cross-section axis (Cross-section tab)."
+        "Pixel steps for moving-slice Y (XZ) / X (YZ): coarse Alt+, / Alt-., fine Ctrl+, / Ctrl-., "
+        "slider arrows, and prefetch spacing along the cross-section axis (Cross-section tab)."
     )
     form3 = QFormLayout()
     form3.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)
     form3.setSpacing(4)
     cs_group.setLayout(form3)
 
-    key = "shortcuts/cs_nudge_px"
-    spin = _int_spin(key, 1, 500)
-    widgets[key] = spin
-    form3.addRow(*_row("Nudge step (Alt+,/.):  ", key, spin))
+    for key, label in [
+        ("shortcuts/cs_nudge_px", "Coarse (Alt+,/.):"),
+        ("shortcuts/cs_nudge_fine_px", "Fine (Ctrl+,/.):"),
+    ]:
+        spin = _int_spin(key, 1, 500)
+        widgets[key] = spin
+        form3.addRow(*_row(label, key, spin))
     layout.addWidget(cs_group)
 
     layout.addStretch()
@@ -259,7 +262,10 @@ def _build_server_tab(widgets: dict) -> QWidget:
 
     note = QLabel(
         "<i style='color:grey;'>These are used as fallback defaults when no server config is loaded.<br>"
-        "Remote Python path must point to the linumpy venv interpreter on the server.</i>"
+        "<b>Remote Python</b> is required for SSH cross-sections: it must be the interpreter "
+        "where linumpy, zarr, ome-zarr, etc. are installed (typically your linumpy repo "
+        "<code>.venv/bin/python</code> on the server). System <code>python3</code> will not work. "
+        "Alternatively set <code>LINUMPY_MANUAL_ALIGN_REMOTE_PYTHON</code> (overrides this field).</i>"
     )
     note.setWordWrap(True)
     layout.addWidget(group)

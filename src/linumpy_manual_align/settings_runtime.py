@@ -28,6 +28,7 @@ def keybindings_from_settings() -> list[tuple[str, str, tuple]]:
     rot_coarse = float(settings.get("shortcuts/rotate_coarse_deg"))
     rot_large = float(settings.get("shortcuts/rotate_large_deg"))
     cs_nudge = int(settings.get("shortcuts/cs_nudge_px"))
+    cs_fine = int(settings.get("shortcuts/cs_nudge_fine_px"))
 
     return [
         ("n", "_next_pair", ()),
@@ -55,6 +56,9 @@ def keybindings_from_settings() -> list[tuple[str, str, tuple]]:
         ("m", "_toggle_alignment_mode", ()),
         ("Alt-,", "_nudge_cs_position", (-cs_nudge,)),
         ("Alt-.", "_nudge_cs_position", (cs_nudge,)),
+        # "Control-comma"/"Control-period" coerce to broken "Ctrl+" in napari; use punctuation literals.
+        ("Control-,", "_nudge_cs_position", (-cs_fine,)),
+        ("Control-.", "_nudge_cs_position", (cs_fine,)),
     ]
 
 
@@ -67,13 +71,15 @@ def shortcut_hints_footer_html() -> str:
     rot_c = float(settings.get("shortcuts/rotate_coarse_deg"))
     rot_l = float(settings.get("shortcuts/rotate_large_deg"))
     cs_n = int(settings.get("shortcuts/cs_nudge_px"))
+    cs_f = int(settings.get("shortcuts/cs_nudge_fine_px"))
     hint_xy = (
         f"←→↑↓: {fine}px &nbsp; Alt+←→↑↓: {coarse}px &nbsp; Shift+←→↑↓: {large}px"
         f"<br>[/]: {rot_f}° &nbsp; Alt+[/]: {rot_c}° &nbsp; Ctrl+[/]: {rot_l}°"
     )
     hint_z = (
         f"↑↓: {fine} vox &nbsp; Alt+↑↓: {coarse} vox (Z depth)"
-        f"<br>←→: cross-section &nbsp; Alt+,/.: ±{cs_n} cross-section<br>V: toggle XZ/YZ"
+        f"<br>←→: tx/ty &nbsp; Alt+,/.: ±{cs_n} moving slice &nbsp; Ctrl+,/.: ±{cs_f} moving slice"
+        f"<br>V: toggle XZ/YZ"
     )
     hint_nav = "N/P: next/prev &nbsp; M: toggle XY/Z &nbsp; S: save<br>Ctrl+Z: undo &nbsp; Ctrl+Shift+Z: redo"
     return f"<small><i style='color: grey;'><b>XY:</b> {hint_xy}<br><b>Z:</b> {hint_z}<br><b>Nav:</b> {hint_nav}</i></small>"

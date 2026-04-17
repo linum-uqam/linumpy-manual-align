@@ -49,6 +49,7 @@ def test_get_unknown_key_raises(isolated_settings):
         ("shortcuts/rotate_coarse_deg", 2.0),
         ("shortcuts/rotate_large_deg", 10.0),
         ("shortcuts/cs_nudge_px", 20),
+        ("shortcuts/cs_nudge_fine_px", 3),
         ("prefetch/steps", 8),
         ("prefetch/evict_radius_multiplier", 20),
         ("spin/tx_ty_step", 2.0),

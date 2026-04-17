@@ -258,7 +258,10 @@ class CrossSectionMixin:
         np.savetxt(str(out_dir / "cs_position.txt"), [cs_y, cs_x], fmt="%d")
 
     def _nudge_cs_position(self: ManualAlignWidget, delta: int) -> None:
-        """Shift the active cross-section slider by *delta* pixels."""
+        """Shift the active cross-section slider (moving Y in XZ, moving X in YZ) by *delta* pixels.
+
+        Bound to Alt+, / Alt-. (coarse step) and Ctrl+, / Ctrl-. (fine step from settings).
+        """
         if self._projection_mode == "xz":
             new_val = max(0, min(self.slider_cs_y.maximum(), self.slider_cs_y.value() + delta))
             self.slider_cs_y.setValue(new_val)
