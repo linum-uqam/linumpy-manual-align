@@ -58,7 +58,7 @@ class UiHelpersMixin:
 
     def _update_cs_slider_visibility(self: ManualAlignWidget) -> None:
         """Show the correct cross-section slider for the current projection mode."""
-        if self._cs_mgr.slices_remote_dir is None:
+        if self._cs_mgr.slices_remote_dir is None and not self._cs_mgr.slice_remote_paths:
             return
         xz = self._projection_mode == "xz"
         yz = self._projection_mode == "yz"

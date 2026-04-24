@@ -34,6 +34,10 @@ class PairNavigationMixin:
     def _pair_label(self: _PairNavHost, fid: int, mid: int) -> str:
         """Return the display label for a pair (fid → mid), including metrics if available."""
         label = f"z{fid:02d} → z{mid:02d}"
+        _cs_mgr = getattr(self, "_cs_mgr", None)
+        _interp = getattr(_cs_mgr, "interpolated_slice_ids", set())
+        if fid in _interp or mid in _interp:
+            label += "  [interp]"
         if mid in self.existing_transforms:
             metrics_path = self.existing_transforms[mid] / "pairwise_registration_metrics.json"
             metrics = load_pairwise_metrics(metrics_path)

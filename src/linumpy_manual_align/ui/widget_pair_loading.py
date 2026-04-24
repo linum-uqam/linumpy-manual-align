@@ -272,7 +272,7 @@ class PairLoadingMixin:
 
         # Interactive cross-section sliders
         if self._projection_mode in ("xz", "yz"):
-            if self._cs_mgr.slices_remote_dir is not None:
+            if self._cs_mgr.slices_remote_dir is not None or bool(self._cs_mgr.slice_remote_paths):
                 # Resolve the cross-section position for this pair.  The priority
                 # chain inside _update_initial_cs_position is:
                 #   1. _cs_positions[mid] (in-memory — set whenever the user moves
