@@ -131,6 +131,7 @@ def build_manual_align_ui(widget: ManualAlignWidget) -> None:
         server_config=widget.server_config,
         on_browse=widget._browse_server_config,
         on_host_changed=widget._on_host_changed,
+        on_remote_python_changed=widget._persist_remote_python,
         on_download=widget._download_from_server,
         on_upload=widget._upload_to_server,
     )
@@ -138,6 +139,7 @@ def build_manual_align_ui(widget: ManualAlignWidget) -> None:
     widget.btn_browse_config = srv.btn_browse_config
     widget.host_edit = srv.host_edit
     widget.host_edit.editingFinished.connect(widget._persist_server_host)
+    widget.remote_python_edit = srv.remote_python_edit
     widget.btn_download = srv.btn_download
     widget.btn_upload = srv.btn_upload
     widget.server_progress = srv.server_progress

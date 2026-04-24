@@ -218,6 +218,15 @@ class ServerMixin:
         """Update server config host when the user edits the host field."""
         if self.server_config is not None:
             self.server_config.host = text.strip()
+
+    def _persist_remote_python(self: ManualAlignWidget) -> None:
+        """Write the Remote Python field to QSettings when editing finishes."""
+        from linumpy_manual_align.settings import settings
+
+        text = self.remote_python_edit.text().strip()
+        current = str(settings.get("server/remote_python")).strip()
+        if text != current:
+            settings.set("server/remote_python", text)
         self._host_persist_timer.start(450)
 
     def _persist_server_host(self: ManualAlignWidget) -> None:

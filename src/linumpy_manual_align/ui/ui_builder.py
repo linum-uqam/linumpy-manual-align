@@ -481,14 +481,15 @@ def build_server_group(
     server_config: object,
     on_browse: Callable,
     on_host_changed: Callable,
+    on_remote_python_changed: Callable,
     on_download: Callable,
     on_upload: Callable,
 ) -> tuple[QGroupBox, types.SimpleNamespace]:
-    """Build the Server group box (config, host, download/upload buttons).
+    """Build the Server group box (config, host, remote Python, download/upload buttons).
 
     Returns ``(group_widget, widgets)`` where *widgets* has
     ``config_path_edit``, ``btn_browse_config``, ``host_edit``,
-    ``btn_download``, ``btn_upload``, ``server_progress``,
+    ``remote_python_edit``, ``btn_download``, ``btn_upload``, ``server_progress``,
     ``server_status_label``.
     """
     group = QGroupBox("Server")
@@ -514,6 +515,21 @@ def build_server_group(
     host_edit.textChanged.connect(on_host_changed)
     host_row.addWidget(host_edit, stretch=1)
     layout.addLayout(host_row)
+
+    from linumpy_manual_align.settings import settings as _settings
+
+    py_row = QHBoxLayout()
+    py_row.addWidget(QLabel("Remote Python:"))
+    remote_python_edit = QLineEdit(str(_settings.get("server/remote_python")))
+    remote_python_edit.setPlaceholderText("/path/to/venv/bin/python on server")
+    remote_python_edit.setToolTip(
+        "Path to the Python interpreter on the server.\n"
+        "Must have linumpy, zarr, and ome-zarr installed.\n"
+        "Required for live cross-section sliders."
+    )
+    remote_python_edit.editingFinished.connect(on_remote_python_changed)
+    py_row.addWidget(remote_python_edit, stretch=1)
+    layout.addLayout(py_row)
 
     srv_btn_row = QHBoxLayout()
     btn_download = QPushButton("⬇ Download Data")
@@ -552,6 +568,7 @@ def build_server_group(
         config_path_edit=config_path_edit,
         btn_browse_config=btn_browse_config,
         host_edit=host_edit,
+        remote_python_edit=remote_python_edit,
         btn_download=btn_download,
         btn_upload=btn_upload,
         server_progress=server_progress,
