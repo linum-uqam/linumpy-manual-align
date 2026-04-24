@@ -195,10 +195,10 @@ uv sync
 uv pip install -e ".[dev]"
 
 # Lint and format
-uv run ruff check src/ tests/ && uv run ruff format --check src/ tests/
+uv run ruff check && uv run ruff format --check
 
 # Type check (library only)
-uv run ty check src/
+uv run ty check
 
 # Run all tests (known third-party deprecations are filtered in pyproject — see [tool.pytest.ini_options])
 uv run pytest tests/ -v
