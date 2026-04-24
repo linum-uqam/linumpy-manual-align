@@ -57,6 +57,8 @@ class UndoSaveMixin:
             self.viewer.status = f"No .tfm file in {tfm_dir}"
             return
 
+        # load_transform returns (tx, ty) already in widget content-shift
+        # convention (matching AlignmentState and napari layer.translate).
         tx, ty, rot, tfm_center = load_transform(tfm_files[0])
         scale = 2**self.level
         img_center = self.pair_centers.get(mid)

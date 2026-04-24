@@ -28,17 +28,22 @@ def adjust_for_rotation_center(
     tfm_center: tuple[float, float],
     img_center: tuple[float, float],
 ) -> tuple[float, float]:
-    """Correct (tx, ty) for a mismatch between a transform's rotation centre and the image centre.
+    """Correct ``(tx, ty)`` for a mismatch between a transform's rotation centre and the image centre.
 
     The linumpy stacking pipeline saves transforms whose rotation centre is the
-    image centre at the full resolution used during registration.  When that
+    image centre at the full resolution used during registration. When that
     centre differs from the image centre at the current display level, the
     translation must be adjusted so that the visual result is the same.
+
+    Inputs and outputs are in the widget's content-shift convention (matching
+    :func:`load_transform` / :func:`save_transform`). The adjustment is the
+    negation of the sitk point-map derivation ``t_sitk' = t_sitk + (I - R) * dc``
+    because widget ``tx`` is the negation of sitk ``tx``.
 
     Parameters
     ----------
     tx, ty:
-        Raw translation from the saved transform (at the transform's own scale).
+        Translation in widget content-shift convention.
     rot_deg:
         Rotation angle in degrees.
     tfm_center:
@@ -49,7 +54,7 @@ def adjust_for_rotation_center(
     Returns
     -------
     tuple[float, float]
-        Adjusted ``(tx, ty)``.
+        Adjusted ``(tx, ty)`` in widget convention.
     """
     if abs(rot_deg) <= 0.01:
         return tx, ty
@@ -57,13 +62,27 @@ def adjust_for_rotation_center(
     dcy = tfm_center[1] - img_center[1]
     rad = np.radians(rot_deg)
     cos_r, sin_r = np.cos(rad), np.sin(rad)
-    tx += (1.0 - cos_r) * dcx + sin_r * dcy
-    ty += -sin_r * dcx + (1.0 - cos_r) * dcy
+    # Signs flipped relative to the sitk-convention derivation because widget
+    # tx is -sitk_tx.
+    tx -= (1.0 - cos_r) * dcx + sin_r * dcy
+    ty -= -sin_r * dcx + (1.0 - cos_r) * dcy
     return tx, ty
 
 
 def load_transform(tfm_path: Path) -> tuple[float, float, float, tuple[float, float]]:
     """Load a .tfm file and return (tx, ty, rotation_deg, center_xy).
+
+    The returned ``tx, ty`` are in the widget-internal content-shift
+    convention (positive ``tx`` means content moves to the right, matching
+    napari ``layer.translate`` and ``scipy.ndimage.shift``). This is the
+    inverse of the SimpleITK output->input (point-map) convention used on
+    disk and by the rest of the linumpy pipeline
+    (``linum_register_pairwise.py``,
+    ``linumpy.stitching.stacking.apply_2d_transform``, ...), so the values
+    are negated when read.
+
+    Save/load is symmetric around the widget convention:
+    ``load_transform(path_returned_by_save_transform(x)) == x``.
 
     Parameters
     ----------
@@ -73,14 +92,16 @@ def load_transform(tfm_path: Path) -> tuple[float, float, float, tuple[float, fl
     Returns
     -------
     tuple[float, float, float, tuple[float, float]]
-        (tx, ty, rotation_deg, (center_x, center_y)) in pixels and degrees.
+        (tx, ty, rotation_deg, (center_x, center_y)) in widget content-shift
+        convention (pixels and degrees).
     """
     tfm = sitk.ReadTransform(str(tfm_path))
     params = tfm.GetParameters()
     # params: [rx, ry, rz, tx, ty, tz] for Euler3DTransform
     rotation_deg = float(np.degrees(params[2]))
-    tx = float(params[3])
-    ty = float(params[4])
+    # Convert SimpleITK (on-disk) convention to widget content-shift convention.
+    tx = -float(params[3])
+    ty = -float(params[4])
     fixed_params = tfm.GetFixedParameters()
     cx = float(fixed_params[0]) if len(fixed_params) > 0 else 0.0
     cy = float(fixed_params[1]) if len(fixed_params) > 1 else 0.0
@@ -122,15 +143,28 @@ def save_transform(
     Translation values are scaled by 2^level to convert from working
     resolution to full resolution pixels. Rotation is scale-invariant.
 
+    The inputs ``tx, ty`` are expressed in the widget's internal
+    scipy-shift convention (positive means content moves to the right /
+    down in napari's display). The on-disk ``.tfm`` file uses SimpleITK's
+    output->input (point-map) convention, which is the negation. This
+    function converts by negating ``tx, ty`` when writing so that
+    downstream consumers that apply the stored transform via
+    ``sitk.ResampleImageFilter`` (e.g.
+    ``linumpy.stitching.stacking.apply_2d_transform``) produce the visual
+    alignment the user saw in the widget.
+
     Also writes a companion pairwise_registration_metrics.json with
-    source="manual" so the stacking pipeline can identify these.
+    source="manual" so the stacking pipeline can identify these. The
+    ``translation_x / translation_y`` fields in the metrics JSON are
+    likewise stored in SimpleITK convention to match the .tfm file.
 
     Parameters
     ----------
     output_dir : Path
         Directory to write into (e.g. manual_transforms/slice_z04/).
     tx, ty : float
-        Translation in pixels at the *working* resolution (pyramid level).
+        Translation in pixels at the *working* resolution (pyramid level),
+        in widget/scipy-shift convention.
     rotation_deg : float
         Rotation in degrees.
     center : tuple[float, float]
@@ -149,8 +183,11 @@ def save_transform(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     scale = 2**level
-    full_tx = tx * scale
-    full_ty = ty * scale
+    # Widget-internal tx/ty are in scipy-shift convention; the on-disk tfm
+    # must be in SimpleITK convention (negated) so downstream sitk.Resample
+    # consumers reproduce the widget's visual alignment.
+    full_tx = -tx * scale
+    full_ty = -ty * scale
     full_cx = center[0] * scale
     full_cy = center[1] * scale
 
@@ -173,6 +210,7 @@ def save_transform(
         "output_path": str(output_dir),
         "source": "manual",
         "metrics": {
+            # Stored in SimpleITK convention to match the .tfm file.
             "translation_x": {"value": full_tx, "unit": "pixels"},
             "translation_y": {"value": full_ty, "unit": "pixels"},
             "translation_magnitude": {"value": mag, "unit": "pixels"},
@@ -184,6 +222,7 @@ def save_transform(
         "overall_status": "ok",
         "manual_alignment": {
             "pyramid_level": level,
+            # Widget-internal (scipy-shift) values for display/debug.
             "working_tx": tx,
             "working_ty": ty,
             "center_working": list(center),

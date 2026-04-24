@@ -94,9 +94,12 @@ class TestSaveOutputFiles:
         assert metrics["source"] == "manual"
         assert metrics["overall_status"] == "ok"
         assert metrics["manual_alignment"]["pyramid_level"] == 1
+        # manual_alignment.working_tx preserves the widget-internal
+        # (content-shift) convention that the user saw in napari.
         assert abs(metrics["manual_alignment"]["working_tx"] - 3.0) < 1e-6
-        # Full-res values should be 2x working (level=1)
-        assert abs(metrics["metrics"]["translation_x"]["value"] - 6.0) < 1e-6
+        # metrics.translation_x is stored in SimpleITK (on-disk) convention
+        # to match the accompanying .tfm file: full-res = -working * 2^level.
+        assert abs(metrics["metrics"]["translation_x"]["value"] - (-6.0)) < 1e-6
 
 
 class TestLoadPairwiseMetrics:
