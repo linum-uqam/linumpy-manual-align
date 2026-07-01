@@ -269,7 +269,14 @@ One `slice_z##/` folder per corrected pair, each containing `transform.tfm`,
 
 ## Code Architecture (for contributors)
 
-The package is split into `io/`, `ui/`, and `remote/` subpackages (plus `settings.py`, `state.py`, `api.py` at the top level):
+The package is split into `io/`, `ui/`, and `remote/` subpackages (plus `settings.py`, `state.py`, `api.py` at the top level).
+
+For the formal layer boundary map and mixin inventory, see the authoritative architecture docs:
+
+- [docs/architecture/BOUNDARIES.md](architecture/BOUNDARIES.md) — layer pyramid, import matrix, documented violations
+- [docs/architecture/MIXIN-MATRIX.md](architecture/MIXIN-MATRIX.md) — 13 behavioral mixins in MRO order with test pointers
+
+The table below is a quick reference; the linked docs are the source of truth.
 
 | Location | Responsibility |
 |----------|----------------|

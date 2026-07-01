@@ -185,6 +185,17 @@ The package uses subpackages under `linumpy_manual_align/`. The napari dock UI i
 | `state.py` | `AlignmentState` dataclass, bounded `UndoStack` |
 | `api.py` | `create_manual_align_widget` for embedding the dock in an existing viewer |
 
+### Architecture documentation
+
+Formal maintainer-facing architecture artifacts live under `docs/architecture/`:
+
+| Document | Description |
+|----------|-------------|
+| [BOUNDARIES.md](docs/architecture/BOUNDARIES.md) | Layer boundary map with Mermaid diagram and import matrix |
+| [MIXIN-MATRIX.md](docs/architecture/MIXIN-MATRIX.md) | Mixin responsibility matrix (MRO order, test pointers) |
+| [REFACTOR-SEQUENCE.md](docs/architecture/REFACTOR-SEQUENCE.md) | Ordered incremental refactor sequence with test gates |
+| [COVERAGE-BASELINE.md](docs/architecture/COVERAGE-BASELINE.md) | Pre-refactor pytest-cov baseline for `contracts/` and `io/` |
+
 ## Development
 
 Always use `uv` to run commands to ensure they execute in the correct environment. The package supports Python 3.14+.
@@ -204,6 +215,16 @@ uv run ty check
 
 # Run all tests (known third-party deprecations are filtered in pyproject — see [tool.pytest.ini_options])
 uv run pytest tests/ -v
+
+# Architecture boundary checks (import-linter contracts)
+uv run lint-imports
+
+# Regenerate coverage baseline for contracts/ and io/
+uv run pytest tests/ \
+  --cov=linumpy_manual_align.contracts \
+  --cov=linumpy_manual_align.io \
+  --cov-report=term-missing \
+  --cov-report=markdown:docs/architecture/coverage-raw.md
 
 # Run a specific test module
 uv run pytest tests/test_image_utils.py -v

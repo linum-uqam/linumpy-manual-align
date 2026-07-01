@@ -2,7 +2,15 @@
 
 from __future__ import annotations
 
-from linumpy_manual_align.api import create_manual_align_widget
+from typing import Any
 
 __all__ = ["__version__", "create_manual_align_widget"]
 __version__ = "0.1.0"
+
+
+def __getattr__(name: str) -> Any:
+    if name == "create_manual_align_widget":
+        from linumpy_manual_align.api import create_manual_align_widget
+
+        return create_manual_align_widget
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

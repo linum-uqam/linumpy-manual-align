@@ -1,6 +1,8 @@
 __pycache__/
 *.py[cod]
 .ruff_cache/
+.coverage
+htmlcov/
 *.egg-info/
 dist/
 build/

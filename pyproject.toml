@@ -119,4 +119,122 @@ possibly-unresolved-reference = "ignore"
 [dependency-groups]
 dev = [
     "pytest>=9.0.3",
+    "import-linter>=2.12",
+    "pytest-cov>=7.1",
+]
+
+# --- import-linter ---
+[tool.importlinter]
+root_package = "linumpy_manual_align"
+include_external_packages = false
+unmatched_ignore_imports_alerting = "error"
+
+[[tool.importlinter.contracts]]
+name = "Strict architecture pyramid"
+type = "layers"
+layers = [
+    "linumpy_manual_align.ui",
+    "linumpy_manual_align.settings_runtime",
+    "linumpy_manual_align.settings",
+    "linumpy_manual_align.remote",
+    "linumpy_manual_align.state",
+    "linumpy_manual_align.io",
+    "linumpy_manual_align.contracts",
+]
+ignore_imports = [
+    # Step 1 — settings boundary decoupling: remove cross_section → settings import
+    "linumpy_manual_align.remote.cross_section -> linumpy_manual_align.settings",
+    # Step 1 — settings boundary decoupling: pass nudge px from ui instead of settings_runtime import
+    "linumpy_manual_align.remote.cross_section -> linumpy_manual_align.settings_runtime",
+    # Step 1 — settings boundary decoupling: read env/parameter in cs_script instead of settings import
+    "linumpy_manual_align.remote.cs_script -> linumpy_manual_align.settings",
+]
+
+[[tool.importlinter.contracts]]
+name = "Layers must not import composition roots"
+type = "forbidden"
+source_modules = [
+    "linumpy_manual_align.contracts",
+    "linumpy_manual_align.io",
+    "linumpy_manual_align.remote",
+    "linumpy_manual_align.ui",
+    "linumpy_manual_align.state",
+    "linumpy_manual_align.settings",
+    "linumpy_manual_align.settings_runtime",
+]
+forbidden_modules = [
+    "linumpy_manual_align.api",
+    "linumpy_manual_align.__main__",
+]
+
+[[tool.importlinter.contracts]]
+name = "Contracts layer isolation"
+type = "forbidden"
+source_modules = ["linumpy_manual_align.contracts"]
+forbidden_modules = [
+    "linumpy_manual_align.io",
+    "linumpy_manual_align.state",
+    "linumpy_manual_align.remote",
+    "linumpy_manual_align.settings",
+    "linumpy_manual_align.settings_runtime",
+    "linumpy_manual_align.ui",
+]
+
+[[tool.importlinter.contracts]]
+name = "IO layer isolation"
+type = "forbidden"
+source_modules = ["linumpy_manual_align.io"]
+forbidden_modules = [
+    "linumpy_manual_align.state",
+    "linumpy_manual_align.remote",
+    "linumpy_manual_align.settings",
+    "linumpy_manual_align.settings_runtime",
+    "linumpy_manual_align.ui",
+]
+
+[[tool.importlinter.contracts]]
+name = "State layer isolation"
+type = "forbidden"
+source_modules = ["linumpy_manual_align.state"]
+forbidden_modules = [
+    "linumpy_manual_align.remote",
+    "linumpy_manual_align.settings",
+    "linumpy_manual_align.settings_runtime",
+    "linumpy_manual_align.ui",
+]
+
+[[tool.importlinter.contracts]]
+name = "Remote layer isolation"
+type = "forbidden"
+source_modules = ["linumpy_manual_align.remote"]
+forbidden_modules = [
+    "linumpy_manual_align.settings",
+    "linumpy_manual_align.settings_runtime",
+    "linumpy_manual_align.ui",
+]
+ignore_imports = [
+    # Step 1 — settings boundary decoupling: remove cross_section → settings import
+    "linumpy_manual_align.remote.cross_section -> linumpy_manual_align.settings",
+    # Step 1 — settings boundary decoupling: pass nudge px from ui instead of settings_runtime import
+    "linumpy_manual_align.remote.cross_section -> linumpy_manual_align.settings_runtime",
+    # Step 1 — settings boundary decoupling: read env/parameter in cs_script instead of settings import
+    "linumpy_manual_align.remote.cs_script -> linumpy_manual_align.settings",
+]
+
+[[tool.importlinter.contracts]]
+name = "Settings layer isolation"
+type = "forbidden"
+source_modules = ["linumpy_manual_align.settings"]
+forbidden_modules = [
+    "linumpy_manual_align.settings_runtime",
+    "linumpy_manual_align.ui",
+]
+
+[[tool.importlinter.contracts]]
+name = "UI layer isolation"
+type = "forbidden"
+source_modules = ["linumpy_manual_align.ui"]
+forbidden_modules = [
+    "linumpy_manual_align.api",
+    "linumpy_manual_align.__main__",
 ]
