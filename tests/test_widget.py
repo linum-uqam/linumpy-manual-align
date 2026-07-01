@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -20,7 +21,9 @@ from linumpy_manual_align.contracts import (
 from linumpy_manual_align.io.transform_io import save_transform
 from linumpy_manual_align.state import _MAX_UNDO_HISTORY, AlignmentState, UndoStack
 from linumpy_manual_align.ui.widget_close_guard import CloseGuardMixin
+from linumpy_manual_align.ui.widget_mixins import PairNavigationMixin
 from linumpy_manual_align.ui.widget_server import ServerMixin
+from linumpy_manual_align.ui.widget_status import StatusMixin
 from linumpy_manual_align.ui.widget_undo_save import UndoSaveMixin
 import linumpy_manual_align.ui.widget_close_guard as widget_close_guard_module
 import linumpy_manual_align.ui.widget_server as widget_server_module
@@ -1276,3 +1279,571 @@ class TestUploadGate:
         assert widget.btn_upload.enabled is True
         assert widget.server_progress.hidden is True
         assert widget.server_status_label.text == "Uploaded 1 transforms to server"
+
+
+class _ComboStub:
+    def __init__(self, items: list[str] | None = None) -> None:
+        self.items: list[str] = list(items or [])
+        self._index = 0
+        self._signals_blocked = False
+
+    def count(self) -> int:
+        return len(self.items)
+
+    def itemText(self, i: int) -> str:
+        return self.items[i]
+
+    def setItemText(self, i: int, text: str) -> None:
+        self.items[i] = text
+
+    def currentIndex(self) -> int:
+        return self._index
+
+    def setCurrentIndex(self, i: int) -> None:
+        self._index = i
+
+    def blockSignals(self, flag: bool) -> bool:
+        prev = self._signals_blocked
+        self._signals_blocked = flag
+        return prev
+
+
+class _ResumeBlockStub:
+    def __init__(self) -> None:
+        self._visible = False
+
+    def hide(self) -> None:
+        self._visible = False
+
+    def show(self) -> None:
+        self._visible = True
+
+    def isVisible(self) -> bool:
+        return self._visible
+
+
+def _make_session_widget(
+    tmp_path: Path,
+    pairs: list[tuple[int, int]],
+    *,
+    saved_pairs: set[int] | None = None,
+    unsaved_changes: set[int] | None = None,
+    uploaded_pairs: set[int] | None = None,
+    server_config: _UploadServerConfig | None = None,
+):
+    from linumpy_manual_align.ui.widget_session import SessionMixin
+
+    class _SessionWidget(SessionMixin, StatusMixin, UndoSaveMixin, PairNavigationMixin):
+        pass
+
+    widget = object.__new__(_SessionWidget)
+    widget.pairs = pairs
+    widget.current_pair_idx = 0
+    widget.output_dir = tmp_path
+    widget.saved_pairs = set(saved_pairs or set())
+    widget.unsaved_changes = set(unsaved_changes or set())
+    widget.uploaded_pairs = set(uploaded_pairs or set())
+    widget.server_config = server_config
+    widget._session_states = {}
+    widget._resume_config_line = ""
+    widget.session_summary_label = _StatusLabel()
+    widget.pair_combo = _ComboStub(
+        [f"z{fid:02d} → z{mid:02d}" for fid, mid in pairs]
+    )
+    widget.status_label = _StatusLabel()
+    widget.viewer = _Viewer()
+    widget.existing_transforms = {}
+    widget.level = 1
+    widget._current_offsets = {mid: (0, 0) for _fid, mid in pairs}
+    widget._projection_mode = "xy"
+    widget._saved_flash_mid = None
+    widget._saved_flash_timer = MagicMock()
+    widget._cs_mgr = MagicMock(interpolated_slice_ids=set())
+    widget.resume_block = _ResumeBlockStub()
+    widget._current_state = lambda: AlignmentState(tx=0.0, ty=0.0, rotation=0.0)
+    return widget
+
+
+def _copy_valid_slice_output(copy_fixture_tree, tmp_path: Path, mid: int) -> Path:
+    golden_root = tmp_path / "_golden_manual_transforms"
+    if not golden_root.exists():
+        copy_fixture_tree("manual_transforms", golden_root)
+    dest = tmp_path / f"slice_z{mid:02d}"
+    if dest.exists():
+        shutil.rmtree(dest)
+    shutil.copytree(golden_root / f"slice_z{mid:02d}", dest)
+    return dest
+
+
+class TestSessionGroupBuild:
+    def test_build_session_group_returns_widgets(self, qapp) -> None:
+        from linumpy_manual_align.ui.ui_builder import build_session_group
+
+        group, ns = build_session_group(
+            on_copy_config=lambda: None,
+            on_dismiss_resume=lambda: None,
+        )
+
+        assert group.title() == "Session"
+        assert ns.session_summary_label is not None
+        assert ns.resume_block is not None
+        assert ns.resume_config_label is not None
+        assert ns.resume_guidance_label is not None
+        assert ns.btn_copy_config_line is not None
+        assert ns.btn_dismiss_resume is not None
+        assert ns.resume_block.isHidden()
+
+    def test_local_only_saved_valid_summary_and_prefix(
+        self, tmp_path: Path, copy_fixture_tree
+    ) -> None:
+        _copy_valid_slice_output(copy_fixture_tree, tmp_path, mid=1)
+        widget = _make_session_widget(
+            tmp_path,
+            [(0, 1)],
+            saved_pairs={1},
+            server_config=None,
+        )
+
+        widget._refresh_session_state()
+
+        summary = widget.session_summary_label.text
+        assert "saved-local" in summary
+        assert "ready" not in summary
+        assert "uploaded" not in summary
+        assert widget.pair_combo.itemText(0).startswith("✓ ")
+
+    def test_on_disk_invalid_summary_and_prefix(self, tmp_path: Path) -> None:
+        (tmp_path / "slice_z01").mkdir()
+        widget = _make_session_widget(tmp_path, [(0, 1)], saved_pairs={1})
+
+        widget._refresh_session_state()
+
+        summary = widget.session_summary_label.text
+        assert "invalid" in summary
+        assert int(summary.split()[0]) >= 1
+        assert widget.pair_combo.itemText(0).startswith("✗ ")
+
+    def test_invalid_over_unsaved_priority(self, tmp_path: Path) -> None:
+        (tmp_path / "slice_z01").mkdir()
+        widget = _make_session_widget(
+            tmp_path,
+            [(0, 1)],
+            saved_pairs={1},
+            unsaved_changes={1},
+        )
+
+        widget._refresh_session_state()
+
+        assert widget.pair_combo.itemText(0).startswith("✗ ")
+        assert not widget.pair_combo.itemText(0).startswith("● ")
+
+    def test_server_mode_ready_prefix_and_summary(
+        self, tmp_path: Path, copy_fixture_tree, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        ready_dir = _copy_valid_slice_output(copy_fixture_tree, tmp_path, mid=1)
+        pair = PairUploadReadiness(
+            moving_id=1,
+            fixed_id=0,
+            status=PairUploadStatus.READY,
+            output_dir=ready_dir,
+            issues=(),
+        )
+        report = _make_readiness_report(
+            ready_count=1,
+            pairs=(pair,),
+            ready_dirs=(ready_dir,),
+        )
+        import linumpy_manual_align.ui.widget_session as widget_session_module
+
+        monkeypatch.setattr(
+            widget_session_module,
+            "assess_upload_readiness",
+            lambda *a, **k: report,
+            raising=False,
+        )
+        widget = _make_session_widget(
+            tmp_path,
+            [(0, 1)],
+            saved_pairs={1},
+            server_config=_UploadServerConfig(
+                host="myserver.example.com",
+                subject_id="sub-22",
+            ),
+        )
+
+        widget._refresh_session_state()
+
+        assert widget.pair_combo.itemText(0).startswith("◎ ")
+        assert "1 ready" in widget.session_summary_label.text
+
+    def test_local_only_contrast_no_ready_prefix(
+        self, tmp_path: Path, copy_fixture_tree
+    ) -> None:
+        _copy_valid_slice_output(copy_fixture_tree, tmp_path, mid=1)
+        widget = _make_session_widget(
+            tmp_path,
+            [(0, 1)],
+            saved_pairs={1},
+            server_config=None,
+        )
+
+        widget._refresh_session_state()
+
+        assert widget.pair_combo.itemText(0).startswith("✓ ")
+        summary = widget.session_summary_label.text
+        assert "ready" not in summary
+        assert "uploaded" not in summary
+
+
+class _ClipboardStub:
+    def __init__(self) -> None:
+        self.text = ""
+
+    def setText(self, text: str) -> None:
+        self.text = text
+
+
+def _make_session_confidence_widget(
+    tmp_path: Path,
+    pairs: list[tuple[int, int]],
+    *,
+    saved_pairs: set[int] | None = None,
+    unsaved_changes: set[int] | None = None,
+    uploaded_pairs: set[int] | None = None,
+    server_config: _UploadServerConfig | None = _UploadServerConfig(
+        host="myserver.example.com",
+        subject_id="sub-22",
+        remote_output="/scratch/workspace/sub-22/output",
+    ),
+):
+    from linumpy_manual_align.ui.widget_pair_loading import PairLoadingMixin
+    from linumpy_manual_align.ui.widget_session import SessionMixin
+
+    class _SessionConfidenceWidget(
+        SessionMixin,
+        ServerMixin,
+        PairLoadingMixin,
+        StatusMixin,
+        UndoSaveMixin,
+        PairNavigationMixin,
+    ):
+        pass
+
+    widget = object.__new__(_SessionConfidenceWidget)
+    widget.pairs = pairs
+    widget.current_pair_idx = 0
+    widget.output_dir = tmp_path
+    widget.saved_pairs = set(saved_pairs or set())
+    widget.unsaved_changes = set(unsaved_changes or set())
+    widget.uploaded_pairs = set(uploaded_pairs or set())
+    widget.server_config = server_config
+    widget._session_states = {}
+    widget._resume_config_line = ""
+    widget._pending_upload_mids = None
+    widget.session_summary_label = _StatusLabel()
+    widget.resume_config_label = _StatusLabel()
+    widget.resume_guidance_label = _StatusLabel()
+    widget.pair_combo = _ComboStub(
+        [f"z{fid:02d} → z{mid:02d}" for fid, mid in pairs]
+    )
+    widget.status_label = _StatusLabel()
+    widget.server_status_label = _StatusLabel()
+    widget.viewer = _Viewer()
+    widget.btn_download = _ButtonStub()
+    widget.btn_upload = _ButtonStub()
+    widget.server_progress = _ProgressStub()
+    widget._worker = None
+    widget.existing_transforms = {}
+    widget.level = 1
+    widget._current_offsets = {mid: (0, 0) for _fid, mid in pairs}
+    widget._projection_mode = "xy"
+    widget._saved_flash_mid = None
+    widget._saved_flash_timer = MagicMock()
+    widget._cs_mgr = MagicMock(interpolated_slice_ids=set())
+    widget.resume_block = _ResumeBlockStub()
+    widget._current_state = lambda: AlignmentState(tx=0.0, ty=0.0, rotation=0.0)
+    return widget
+
+
+def _finish_upload(widget, *, mids: set[int], msg: str = "Uploaded 2 transforms to host:/path") -> None:
+    widget._pending_upload_mids = set(mids)
+    widget._on_upload_finished(True, msg)
+
+
+class TestSessionConfidence:
+    def test_uploaded_lifecycle_sets_pairs_and_prefixes(
+        self, tmp_path: Path, copy_fixture_tree, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _copy_valid_slice_output(copy_fixture_tree, tmp_path, mid=1)
+        _copy_valid_slice_output(copy_fixture_tree, tmp_path, mid=2)
+        ready_dir1 = tmp_path / "slice_z01"
+        ready_dir2 = tmp_path / "slice_z02"
+        pair1 = PairUploadReadiness(
+            moving_id=1,
+            fixed_id=0,
+            status=PairUploadStatus.READY,
+            output_dir=ready_dir1,
+            issues=(),
+        )
+        pair2 = PairUploadReadiness(
+            moving_id=2,
+            fixed_id=1,
+            status=PairUploadStatus.READY,
+            output_dir=ready_dir2,
+            issues=(),
+        )
+        report = _make_readiness_report(
+            ready_count=2,
+            pairs=(pair1, pair2),
+            ready_dirs=(ready_dir1, ready_dir2),
+        )
+        import linumpy_manual_align.ui.widget_session as widget_session_module
+
+        monkeypatch.setattr(
+            widget_session_module,
+            "assess_upload_readiness",
+            lambda *a, **k: report,
+            raising=False,
+        )
+        widget = _make_session_confidence_widget(
+            tmp_path,
+            [(0, 1), (1, 2)],
+            saved_pairs={1, 2},
+        )
+        _patch_upload_settings(monkeypatch)
+
+        _finish_upload(widget, mids={1, 2})
+
+        assert widget.uploaded_pairs == {1, 2}
+        assert widget.pair_combo.itemText(0).startswith("↑ ")
+        assert widget.pair_combo.itemText(1).startswith("↑ ")
+        assert "2 uploaded" in widget.session_summary_label.text
+
+    def test_reupload_replaces_uploaded_batch(
+        self, tmp_path: Path, copy_fixture_tree, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _copy_valid_slice_output(copy_fixture_tree, tmp_path, mid=1)
+        _copy_valid_slice_output(copy_fixture_tree, tmp_path, mid=2)
+        ready_dir2 = tmp_path / "slice_z02"
+        pair2 = PairUploadReadiness(
+            moving_id=2,
+            fixed_id=1,
+            status=PairUploadStatus.READY,
+            output_dir=ready_dir2,
+            issues=(),
+        )
+        report = _make_readiness_report(
+            ready_count=1,
+            pairs=(pair2,),
+            ready_dirs=(ready_dir2,),
+        )
+        import linumpy_manual_align.ui.widget_session as widget_session_module
+
+        monkeypatch.setattr(
+            widget_session_module,
+            "assess_upload_readiness",
+            lambda *a, **k: report,
+            raising=False,
+        )
+        widget = _make_session_confidence_widget(
+            tmp_path,
+            [(0, 1), (1, 2)],
+            saved_pairs={1, 2},
+        )
+        _patch_upload_settings(monkeypatch)
+
+        _finish_upload(widget, mids={1, 2}, msg="Uploaded 2 transforms to host:/path")
+        _finish_upload(widget, mids={2}, msg="Uploaded 1 transforms to host:/path")
+
+        assert widget.uploaded_pairs == {2}
+        assert not widget.pair_combo.itemText(0).startswith("↑ ")
+        assert widget.pair_combo.itemText(1).startswith("↑ ")
+
+    def test_edit_clears_uploaded_marker(
+        self, tmp_path: Path, copy_fixture_tree, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _copy_valid_slice_output(copy_fixture_tree, tmp_path, mid=1)
+        ready_dir = tmp_path / "slice_z01"
+        pair = PairUploadReadiness(
+            moving_id=1,
+            fixed_id=0,
+            status=PairUploadStatus.READY,
+            output_dir=ready_dir,
+            issues=(),
+        )
+        report = _make_readiness_report(
+            ready_count=1,
+            pairs=(pair,),
+            ready_dirs=(ready_dir,),
+        )
+        import linumpy_manual_align.ui.widget_session as widget_session_module
+
+        monkeypatch.setattr(
+            widget_session_module,
+            "assess_upload_readiness",
+            lambda *a, **k: report,
+            raising=False,
+        )
+        widget = _make_session_confidence_widget(
+            tmp_path,
+            [(0, 1)],
+            saved_pairs={1},
+            uploaded_pairs={1},
+        )
+        widget._refresh_session_state()
+        assert widget.pair_combo.itemText(0).startswith("↑ ")
+
+        widget._mark_pair_edited(1)
+
+        assert 1 not in widget.uploaded_pairs
+        assert not widget.pair_combo.itemText(0).startswith("↑ ")
+
+    def test_resume_block_shows_full_path(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        widget = _make_session_confidence_widget(tmp_path, [(0, 1)], saved_pairs={1})
+        _patch_upload_settings(monkeypatch)
+
+        _finish_upload(widget, mids={1})
+
+        config_text = widget.resume_config_label.text
+        assert "params.manual_transforms_dir = '" in config_text
+        assert "/scratch/workspace/sub-22/output/manual_transforms" in config_text
+        assert "host:" not in config_text
+        assert widget.resume_block.isVisible()
+
+    def test_copy_config_line(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        widget = _make_session_confidence_widget(tmp_path, [(0, 1)], saved_pairs={1})
+        _patch_upload_settings(monkeypatch)
+        _finish_upload(widget, mids={1})
+
+        clipboard = _ClipboardStub()
+        import linumpy_manual_align.ui.widget_session as widget_session_module
+
+        monkeypatch.setattr(
+            widget_session_module.QApplication,
+            "clipboard",
+            staticmethod(lambda: clipboard),
+        )
+
+        widget._copy_config_line()
+
+        assert clipboard.text == widget.resume_config_label.text
+        assert widget.viewer.status == "Copied config line to clipboard"
+
+    def test_resume_guidance_mentions_stack_and_resume(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        widget = _make_session_confidence_widget(tmp_path, [(0, 1)], saved_pairs={1})
+        _patch_upload_settings(monkeypatch)
+        _finish_upload(widget, mids={1})
+
+        guidance = widget.resume_guidance_label.text
+        assert "stack" in guidance
+        assert "-resume" in guidance
+
+    def test_local_only_hides_resume_and_upload_counts(
+        self, tmp_path: Path, copy_fixture_tree
+    ) -> None:
+        _copy_valid_slice_output(copy_fixture_tree, tmp_path, mid=1)
+        widget = _make_session_confidence_widget(
+            tmp_path,
+            [(0, 1)],
+            saved_pairs={1},
+            server_config=None,
+        )
+
+        widget._refresh_session_state()
+
+        assert not widget.resume_block.isVisible()
+        summary = widget.session_summary_label.text
+        assert "ready" not in summary
+        assert "uploaded" not in summary
+
+    def test_download_finish_refreshes_session(
+        self, tmp_path: Path, copy_fixture_tree, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _copy_valid_slice_output(copy_fixture_tree, tmp_path, mid=1)
+        widget = _make_session_confidence_widget(
+            tmp_path,
+            [(0, 1)],
+            saved_pairs=set(),
+            server_config=None,
+        )
+        widget._refresh_session_state()
+        assert "0 saved-local" in widget.session_summary_label.text
+
+        local_dir = tmp_path / "server_package"
+        aips = local_dir / "manual_align_package" / "aips"
+        aips.mkdir(parents=True)
+        (aips / "slice_000.npz").touch()
+
+        monkeypatch.setattr(
+            widget_server_module,
+            "discover_aips",
+            lambda _path: {0: aips / "slice_000.npz"},
+            raising=False,
+        )
+        monkeypatch.setattr(
+            widget_server_module,
+            "discover_pair_aips",
+            lambda _path: {(0, 1): (aips / "slice_000.npz", aips / "slice_000.npz")},
+            raising=False,
+        )
+        monkeypatch.setattr(widget, "_discover_axis_aip_dirs", lambda _root: None)
+        setattr(widget, "_load_remote_cs_metadata", lambda _root: None)
+        monkeypatch.setattr(widget, "_rebuild_pairs", lambda: None)
+
+        widget._on_download_finished(True, "Download complete", local_dir)
+
+        assert "1 saved-local" in widget.session_summary_label.text
+
+    def test_load_existing_package_refreshes_session(
+        self, tmp_path: Path, copy_fixture_tree, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _copy_valid_slice_output(copy_fixture_tree, tmp_path, mid=1)
+        widget = _make_session_confidence_widget(
+            tmp_path,
+            [(0, 1)],
+            saved_pairs=set(),
+            server_config=None,
+        )
+        widget._refresh_session_state()
+        assert "0 saved-local" in widget.session_summary_label.text
+
+        aips = tmp_path / "manual_align_package" / "aips"
+        aips.mkdir(parents=True)
+        (aips / "slice_000.npz").touch()
+
+        monkeypatch.setattr(
+            widget_server_module,
+            "discover_aips",
+            lambda _path: {0: aips / "slice_000.npz"},
+            raising=False,
+        )
+        monkeypatch.setattr(
+            widget_server_module,
+            "discover_pair_aips",
+            lambda _path: {(0, 1): (aips / "slice_000.npz", aips / "slice_000.npz")},
+            raising=False,
+        )
+        monkeypatch.setattr(widget, "_discover_axis_aip_dirs", lambda _root: None)
+        setattr(widget, "_load_remote_cs_metadata", lambda _root: None)
+        monkeypatch.setattr(widget, "_rebuild_pairs", lambda: None)
+
+        widget._load_existing_package(aips)
+
+        assert "1 saved-local" in widget.session_summary_label.text
+
+    def test_server_status_unchanged_after_upload(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        widget = _make_session_confidence_widget(tmp_path, [(0, 1)], saved_pairs={1})
+        _patch_upload_settings(monkeypatch)
+        msg = "Uploaded 2 transforms to host:/path"
+
+        _finish_upload(widget, mids={1, 2}, msg=msg)
+
+        assert widget.server_status_label.text == msg

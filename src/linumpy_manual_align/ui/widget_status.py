@@ -64,6 +64,10 @@ class StatusMixin:
             if quality_parts:
                 lines.append(f"<i>Quality: {', '.join(quality_parts)}</i>")
 
+        session_line = self._session_status_line(mid) if hasattr(self, "_session_status_line") else None
+        if session_line:
+            lines.append(session_line)
+
         if self._saved_flash_mid == mid:
             lines.append("<b style='color: green;'>✓ SAVED</b>")
 

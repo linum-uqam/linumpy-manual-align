@@ -557,7 +557,8 @@ def build_server_group(
         if hasattr(server_config, "config_path") and server_config.config_path:
             config_path_edit.setText(str(server_config.config_path))
         if hasattr(server_config, "host"):
-            host_edit.setText(server_config.host)
+            host_from_config = str(getattr(server_config, "host", "")).strip()
+            host_edit.setText(host_from_config or default_host_display())
     else:
         btn_download.setEnabled(False)
         btn_upload.setEnabled(False)
@@ -572,4 +573,61 @@ def build_server_group(
         btn_upload=btn_upload,
         server_progress=server_progress,
         server_status_label=server_status_label,
+    )
+
+
+def build_session_group(
+    on_copy_config: Callable,
+    on_dismiss_resume: Callable,
+) -> tuple[QGroupBox, types.SimpleNamespace]:
+    """Build the Session group box (summary line + hidden resume block).
+
+    Returns ``(group_widget, widgets)`` where *widgets* has
+    ``session_summary_label``, ``resume_block``, ``resume_config_label``,
+    ``resume_guidance_label``, ``btn_copy_config_line``, ``btn_dismiss_resume``.
+    """
+    group = QGroupBox("Session")
+    layout = QVBoxLayout()
+    layout.setSpacing(4)
+    group.setLayout(layout)
+
+    session_summary_label = QLabel("")
+    session_summary_label.setWordWrap(True)
+    layout.addWidget(session_summary_label)
+
+    resume_block = QWidget()
+    resume_layout = QVBoxLayout()
+    resume_layout.setSpacing(4)
+    resume_block.setLayout(resume_layout)
+
+    resume_config_label = QLabel("")
+    resume_config_label.setWordWrap(True)
+    resume_layout.addWidget(resume_config_label)
+
+    resume_guidance_label = QLabel("")
+    resume_guidance_label.setStyleSheet("color: grey; font-style: italic;")
+    resume_layout.addWidget(resume_guidance_label)
+
+    btn_row = QHBoxLayout()
+    btn_row.setSpacing(4)
+    btn_copy_config_line = QPushButton("Copy config line")
+    btn_copy_config_line.clicked.connect(on_copy_config)
+    btn_row.addWidget(btn_copy_config_line)
+    btn_dismiss_resume = QToolButton()
+    btn_dismiss_resume.setText("×")
+    btn_dismiss_resume.setToolTip("Dismiss resume guidance")
+    btn_dismiss_resume.clicked.connect(on_dismiss_resume)
+    btn_row.addWidget(btn_dismiss_resume)
+    resume_layout.addLayout(btn_row)
+
+    resume_block.hide()
+    layout.addWidget(resume_block)
+
+    return group, types.SimpleNamespace(
+        session_summary_label=session_summary_label,
+        resume_block=resume_block,
+        resume_config_label=resume_config_label,
+        resume_guidance_label=resume_guidance_label,
+        btn_copy_config_line=btn_copy_config_line,
+        btn_dismiss_resume=btn_dismiss_resume,
     )

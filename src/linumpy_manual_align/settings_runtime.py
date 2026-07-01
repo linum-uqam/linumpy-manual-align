@@ -157,6 +157,25 @@ def persist_dock_host_if_changed(host_edit: QLineEdit) -> None:
     settings.set("server/default_host", text)
 
 
+def persist_remote_python_if_changed(remote_python_edit: QLineEdit) -> None:
+    """Write the dock Remote Python field to QSettings when it differs from stored."""
+    text = remote_python_edit.text().strip()
+    current = str(settings.get("server/remote_python")).strip()
+    if text == current:
+        return
+    settings.set("server/remote_python", text)
+
+
+def persist_server_dock_fields(
+    host_edit: QLineEdit,
+    remote_python_edit: QLineEdit | None = None,
+) -> None:
+    """Persist global server dock fields (host, remote Python) to QSettings."""
+    persist_dock_host_if_changed(host_edit)
+    if remote_python_edit is not None:
+        persist_remote_python_if_changed(remote_python_edit)
+
+
 def apply_settings_changed(widget: Any, key: str) -> None:
     """Dispatch ``settings.changed`` to keybindings, hints, spinboxes, and host field.
 

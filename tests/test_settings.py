@@ -140,3 +140,40 @@ def test_changed_signal_fires_for_all_keys_on_reset_all(isolated_settings, qapp)
     isolated_settings.reset_all()
 
     assert set(received_keys) == set(DEFAULTS.keys())
+
+
+# ---------------------------------------------------------------------------
+# Server dock field persistence
+# ---------------------------------------------------------------------------
+
+
+def test_persist_server_dock_fields_writes_host_and_python(isolated_settings, qapp):
+    from qtpy.QtWidgets import QLineEdit
+
+    from linumpy_manual_align.settings_runtime import persist_server_dock_fields
+
+    host_edit = QLineEdit("192.168.1.10")
+    py_edit = QLineEdit("/scratch/.venv/bin/python")
+
+    persist_server_dock_fields(host_edit, py_edit)
+
+    assert isolated_settings.get("server/default_host") == "192.168.1.10"
+    assert isolated_settings.get("server/remote_python") == "/scratch/.venv/bin/python"
+
+
+def test_persist_server_dock_fields_skips_unchanged(isolated_settings, qapp):
+    from qtpy.QtWidgets import QLineEdit
+
+    from linumpy_manual_align.settings_runtime import persist_server_dock_fields
+
+    isolated_settings.set("server/default_host", "10.0.0.2")
+    isolated_settings.set("server/remote_python", "/opt/python")
+
+    host_edit = QLineEdit("10.0.0.2")
+    py_edit = QLineEdit("/opt/python")
+    writes: list[tuple[str, object]] = []
+    isolated_settings.changed.connect(lambda k, v: writes.append((k, v)))
+
+    persist_server_dock_fields(host_edit, py_edit)
+
+    assert writes == []

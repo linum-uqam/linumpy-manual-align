@@ -28,6 +28,22 @@ logger = logging.getLogger(__name__)
 class UndoSaveMixin:
     """Mixin that implements undo/redo, per-pair save, and batch save-all operations."""
 
+    def _sync_unsaved_after_history_change(self: ManualAlignWidget, mid: int) -> None:
+        """Reconcile unsaved_changes with undo stack position after undo/redo."""
+        stack = self.undo_stacks.get(mid)
+        if stack is None:
+            return
+        saved_idx = getattr(self, "_saved_stack_indices", {}).get(mid)
+        if mid in self.saved_pairs and saved_idx is not None:
+            if stack._index == saved_idx:
+                self.unsaved_changes.discard(mid)
+            else:
+                self.unsaved_changes.add(mid)
+        elif stack._index == 0:
+            self.unsaved_changes.discard(mid)
+        else:
+            self.unsaved_changes.add(mid)
+
     def _undo(self: ManualAlignWidget) -> None:
         if not self.pairs:
             return
@@ -37,7 +53,11 @@ class UndoSaveMixin:
             state = stack.undo()
             if state:
                 self._apply_state(state, push=False)
-                self._update_status()
+                self._sync_unsaved_after_history_change(mid)
+                if hasattr(self, "_refresh_session_state"):
+                    self._refresh_session_state()
+                else:
+                    self._update_status()
 
     def _redo(self: ManualAlignWidget) -> None:
         if not self.pairs:
@@ -48,7 +68,11 @@ class UndoSaveMixin:
             state = stack.redo()
             if state:
                 self._apply_state(state, push=False)
-                self._update_status()
+                self._sync_unsaved_after_history_change(mid)
+                if hasattr(self, "_refresh_session_state"):
+                    self._refresh_session_state()
+                else:
+                    self._update_status()
 
     # ----- Transform actions -----
 
@@ -119,10 +143,19 @@ class UndoSaveMixin:
             self.viewer.status = message
             self.status_label.setText(message)
             QMessageBox.critical(self, "Save validation failed", message)
+            if hasattr(self, "_refresh_session_state"):
+                self._refresh_session_state()
             return errors
 
         self.saved_pairs.add(mid)
         self.unsaved_changes.discard(mid)
+        stack = self.undo_stacks.get(mid)
+        if stack is not None:
+            indices = getattr(self, "_saved_stack_indices", None)
+            if indices is None:
+                self._saved_stack_indices = {}
+                indices = self._saved_stack_indices
+            indices[mid] = stack._index
         base = f"Saved transform for z{mid:02d} -> {out_dir}"
         if warnings:
             warning_text = "; ".join(f"{w.code}: {w.message}" for w in warnings)
@@ -132,6 +165,8 @@ class UndoSaveMixin:
         self.viewer.status = status
         self.status_label.setText(status)
         self._flash_saved(mid)
+        if hasattr(self, "_refresh_session_state"):
+            self._refresh_session_state()
         return []
 
     def _save_current(self: ManualAlignWidget) -> None:

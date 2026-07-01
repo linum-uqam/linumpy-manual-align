@@ -164,6 +164,11 @@ class TestLoadOffsets:
         result = load_offsets(out_dir / "offsets.txt")
         assert result == (3, 7)
 
+    def test_non_integer_offsets_returns_zeros(self, tmp_path: Path) -> None:
+        offsets_path = tmp_path / "offsets.txt"
+        offsets_path.write_text("not-an-integer\nalso-bad\n", encoding="utf-8")
+        assert load_offsets(offsets_path) == (0, 0)
+
 
 # ---------------------------------------------------------------------------
 # discover_aips

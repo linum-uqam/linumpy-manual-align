@@ -82,6 +82,10 @@ class OverlayStateMixin:
         if push:
             self.undo_stacks[mid].push(state)
             self.unsaved_changes.add(mid)
+            if hasattr(self, "uploaded_pairs"):
+                self.uploaded_pairs.discard(mid)
+            if hasattr(self, "_refresh_session_state"):
+                self._refresh_session_state()
 
         sy, sx = self._moving_scale_yx[0], self._moving_scale_yx[1]
 

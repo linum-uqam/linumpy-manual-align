@@ -123,7 +123,12 @@ def load_offsets(offsets_path: Path) -> tuple[int, int]:
     """
     if not offsets_path.exists():
         return (0, 0)
-    vals = np.loadtxt(str(offsets_path), dtype=int)
+    try:
+        vals = np.loadtxt(str(offsets_path), dtype=int)
+    except (ValueError, TypeError):
+        # Invalid on-disk offsets are surfaced via contract validation in the
+        # dock status line — do not crash pair load (np.loadtxt on bad tokens).
+        return (0, 0)
     if vals.size >= 2:
         return (int(vals[0]), int(vals[1]))
     return (0, 0)

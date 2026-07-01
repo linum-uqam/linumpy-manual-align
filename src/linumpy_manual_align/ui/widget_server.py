@@ -6,13 +6,13 @@ from pathlib import Path
 
 from qtpy.QtWidgets import QFileDialog, QMessageBox
 
-from linumpy_manual_align.contracts import UploadReadinessReport, assess_upload_readiness
+from linumpy_manual_align.contracts import UploadReadinessReport, assess_upload_readiness, moving_ids_from_slice_dirs
 from linumpy_manual_align.io.transform_io import discover_aips, discover_pair_aips, discover_transforms
 from linumpy_manual_align.remote import ScpWorker
 from linumpy_manual_align.settings import settings
 from linumpy_manual_align.settings_runtime import (
     default_host_display,
-    persist_dock_host_if_changed,
+    persist_server_dock_fields,
     sync_server_config_host_from_ui,
 )
 from linumpy_manual_align.ui.widget_typing import ManualAlignWidget
@@ -95,6 +95,8 @@ class ServerMixin:
                 # Refresh saved pairs from disk then rebuild
                 self._refresh_saved_pairs()
                 self._rebuild_pairs()
+                if hasattr(self, "_refresh_session_state"):
+                    self._refresh_session_state()
 
     def _format_blocked_upload_body(self: ManualAlignWidget, report: UploadReadinessReport) -> str:
         """Build the critical-dialog body for a blocked upload readiness report."""
@@ -157,6 +159,8 @@ class ServerMixin:
         if not self._confirm_upload_dialog(report, remote_dest):
             return
 
+        self._pending_upload_mids = moving_ids_from_slice_dirs(report.ready_dirs)
+
         self.btn_download.setEnabled(False)
         self.btn_upload.setEnabled(False)
         self.server_progress.show()
@@ -171,7 +175,7 @@ class ServerMixin:
         self._worker.finished.connect(self._worker.deleteLater)
         self._worker.start()
 
-    def _on_upload_finished(self: ManualAlignWidget, _ok: bool, msg: str) -> None:
+    def _on_upload_finished(self: ManualAlignWidget, ok: bool, msg: str) -> None:
         """Handle completion of background upload."""
         self.server_progress.hide()
         self.server_status_label.setText(msg)
@@ -179,6 +183,26 @@ class ServerMixin:
         self.btn_download.setEnabled(True)
         self.btn_upload.setEnabled(True)
         self._worker = None
+
+        pending_mids = getattr(self, "_pending_upload_mids", None)
+        if ok and pending_mids is not None and hasattr(self, "uploaded_pairs"):
+            self.uploaded_pairs = set(pending_mids)
+            if self.server_config is not None:
+                remote_base = str(settings.get("server/remote_workspace_base"))
+                self.server_config.remote_output = (
+                    f"{remote_base}/workspace/{self.server_config.subject_id}/output"
+                )
+                path = f"{self.server_config.remote_output}/manual_transforms"
+                escaped = path.replace("'", "\\'")
+                config_line = f"params.manual_transforms_dir = '{escaped}'"
+                if hasattr(self, "_show_resume_block"):
+                    self._show_resume_block(
+                        config_line,
+                        "Re-run the pipeline from stack with -resume.",
+                    )
+            self._pending_upload_mids = None
+            if hasattr(self, "_refresh_session_state"):
+                self._refresh_session_state()
 
     def _rebuild_pairs(self: ManualAlignWidget) -> None:
         """Rebuild pair list after slice discovery changes, then reload UI."""
@@ -237,10 +261,13 @@ class ServerMixin:
 
         self.server_config = cfg
         self.config_path_edit.setText(str(config_path))
+        effective_host = (cfg.host or host).strip()
         self.host_edit.blockSignals(True)
-        self.host_edit.setText(cfg.host)
+        self.host_edit.setText(effective_host)
         self.host_edit.blockSignals(False)
-        settings.set("server/default_host", cfg.host.strip())
+        if effective_host:
+            settings.set("server/default_host", effective_host)
+            cfg.host = effective_host
         self.btn_download.setEnabled(True)
         self.btn_upload.setEnabled(True)
 
@@ -256,6 +283,9 @@ class ServerMixin:
             self._load_existing_package(existing)
         else:
             self.server_status_label.setText(f"Configured: {cfg.subject_id} @ {cfg.host}")
+
+        if hasattr(self, "_refresh_session_state"):
+            self._refresh_session_state()
 
     def _find_existing_package(self: ManualAlignWidget) -> Path | None:
         """Return the aips/ dir of an already-downloaded package, or None."""
@@ -302,25 +332,33 @@ class ServerMixin:
 
         self._refresh_saved_pairs()
         self._rebuild_pairs()
+        if hasattr(self, "_refresh_session_state"):
+            self._refresh_session_state()
 
     def _on_host_changed(self: ManualAlignWidget, text: str) -> None:
         """Update server config host when the user edits the host field."""
         if self.server_config is not None:
             self.server_config.host = text.strip()
+        self._schedule_server_settings_persist()
+
+    def _schedule_server_settings_persist(self: ManualAlignWidget) -> None:
+        """Debounce writes of global server dock fields to QSettings."""
+        self._host_persist_timer.start(450)
 
     def _persist_remote_python(self: ManualAlignWidget) -> None:
-        """Write the Remote Python field to QSettings when editing finishes."""
-        from linumpy_manual_align.settings import settings
-
-        text = self.remote_python_edit.text().strip()
-        current = str(settings.get("server/remote_python")).strip()
-        if text != current:
-            settings.set("server/remote_python", text)
-        self._host_persist_timer.start(450)
+        """Write dock server fields to QSettings when editing finishes."""
+        self._flush_server_settings_persist()
 
     def _persist_server_host(self: ManualAlignWidget) -> None:
         """Write the dock Host field to QSettings so it survives restarts."""
-        persist_dock_host_if_changed(self.host_edit)
+        self._flush_server_settings_persist()
+
+    def _flush_server_settings_persist(self: ManualAlignWidget) -> None:
+        """Immediately persist host and remote Python from the dock."""
+        self._host_persist_timer.stop()
+        if hasattr(self, "host_edit"):
+            remote_edit = getattr(self, "remote_python_edit", None)
+            persist_server_dock_fields(self.host_edit, remote_edit)
 
     def _sync_server_config_host_from_ui(self: ManualAlignWidget) -> None:
         """Align ``ServerConfig.host`` with the dock when CLI parsed an empty host.

@@ -11,6 +11,7 @@ import pytest
 from linumpy_manual_align.remote import (
     ServerConfig,
     _cs_server_script,
+    download_manual_align_package,
     parse_server_config,
     upload_manual_transforms,
 )
@@ -119,7 +120,7 @@ class TestUploadManualTransforms:
     def mocks(self, monkeypatch: pytest.MonkeyPatch) -> dict:
         captured: dict = {"scp_args": None, "scp_called": False}
 
-        def fake_run_scp(args: list[str], description: str) -> tuple[bool, str]:
+        def fake_run_scp(args: list[str], description: str, **kwargs: object) -> tuple[bool, str]:
             captured["scp_args"] = args
             captured["scp_called"] = True
             return True, "OK"
@@ -199,6 +200,64 @@ class TestUploadManualTransforms:
         assert ok is False
         assert str(outside) in msg
         assert mocks["scp_called"] is False
+
+
+class TestDownloadManualAlignPackage:
+    def test_download_archives_on_server_then_extracts_locally(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        cfg = _server_config()
+        local_dir = tmp_path / "server_package"
+        calls: dict[str, list] = {"ssh": [], "scp": [], "rm_ssh": []}
+
+        def fake_run_ssh(
+            server: ServerConfig,
+            remote_cmd: str,
+            description: str,
+            *,
+            timeout: int = 120,
+        ) -> tuple[bool, str]:
+            calls["ssh"].append(remote_cmd)
+            if remote_cmd.startswith("rm -f "):
+                calls["rm_ssh"].append(remote_cmd)
+            return True, "OK"
+
+        def fake_run_scp(
+            args: list[str],
+            description: str,
+            *,
+            timeout: int = scp_ops._DEFAULT_SCP_TIMEOUT_SEC,
+        ) -> tuple[bool, str]:
+            calls["scp"].append(args)
+            archive_path = Path(args[1])
+            archive_path.parent.mkdir(parents=True, exist_ok=True)
+            pkg_root = tmp_path / "build_pkg" / "manual_align_package" / "aips"
+            pkg_root.mkdir(parents=True)
+            (pkg_root / "aip_001.npz").touch()
+            (pkg_root / "aip_002.npz").touch()
+            import tarfile
+
+            with tarfile.open(archive_path, "w:gz") as archive:
+                archive.add(pkg_root.parent, arcname="manual_align_package")
+            return True, "OK"
+
+        monkeypatch.setattr(scp_ops, "_run_ssh", fake_run_ssh)
+        monkeypatch.setattr(scp_ops, "_run_scp", fake_run_scp)
+
+        ok, msg = download_manual_align_package(cfg, local_dir)
+
+        assert ok is True
+        assert "2 AIPs" in msg
+        assert calls["ssh"]
+        assert "tar -czf" in calls["ssh"][0]
+        assert "manual_align_package" in calls["ssh"][0]
+        scp_args = calls["scp"][0]
+        assert len(scp_args) == 2
+        assert scp_args[0].startswith("h:")
+        assert scp_args[0].endswith(".tar.gz")
+        assert "-r" not in scp_args
+        assert (local_dir / "manual_align_package" / "aips").exists()
+        assert calls["rm_ssh"]
 
 
 class TestCsServerScript:

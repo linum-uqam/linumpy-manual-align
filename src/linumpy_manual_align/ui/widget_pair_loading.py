@@ -257,6 +257,12 @@ class PairLoadingMixin:
         if mid not in self.undo_stacks:
             initial = self._get_automated_state(mid)
             self.undo_stacks[mid] = UndoStack(initial)
+            if mid in self.saved_pairs:
+                indices = getattr(self, "_saved_stack_indices", None)
+                if indices is None:
+                    self._saved_stack_indices = {}
+                    indices = self._saved_stack_indices
+                indices[mid] = 0
 
         # Load Z-offsets for this pair — prefer a manually saved offsets.txt
         if mid not in self._current_offsets:

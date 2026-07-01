@@ -42,6 +42,7 @@ from linumpy_manual_align.remote import ScpWorker
 from linumpy_manual_align.remote.cross_section import CrossSectionManager
 from linumpy_manual_align.settings import settings
 from linumpy_manual_align.ui.widget_build import build_manual_align_ui
+from linumpy_manual_align.contracts import PairSessionState
 from linumpy_manual_align.ui.widget_close_guard import CloseGuardMixin
 from linumpy_manual_align.ui.widget_cross_section import CrossSectionMixin
 from linumpy_manual_align.ui.widget_interaction import InteractionMixin
@@ -50,6 +51,7 @@ from linumpy_manual_align.ui.widget_overlay import OverlayStateMixin
 from linumpy_manual_align.ui.widget_pair_loading import PairLoadingMixin
 from linumpy_manual_align.ui.widget_projection import ProjectionEventMixin
 from linumpy_manual_align.ui.widget_server import ServerMixin
+from linumpy_manual_align.ui.widget_session import SessionMixin
 from linumpy_manual_align.ui.widget_settings_ui import SettingsUiMixin
 from linumpy_manual_align.ui.widget_status import StatusMixin
 from linumpy_manual_align.ui.widget_ui import UiHelpersMixin
@@ -66,6 +68,7 @@ class ManualAlignWidget(
     ProjectionEventMixin,
     CrossSectionMixin,
     UndoSaveMixin,
+    SessionMixin,
     ServerMixin,
     StatusMixin,
     SettingsUiMixin,
@@ -129,6 +132,10 @@ class ManualAlignWidget(
         self.undo_stacks = {}
         self.saved_pairs: set[int] = set()
         self.unsaved_changes: set[int] = set()
+        self._saved_stack_indices: dict[int, int] = {}
+        self.uploaded_pairs: set[int] = set()
+        self._session_states: dict[int, PairSessionState] = {}
+        self._resume_config_line = ""
         self.pair_centers: dict[int, tuple[float, float]] = {}
 
         self._refresh_saved_pairs()

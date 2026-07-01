@@ -38,6 +38,9 @@ class CloseGuardMixin:
 
     def _shutdown_workers(self: ManualAlignWidget) -> None:
         """Quit and join every background QThread owned by this widget."""
+        if hasattr(self, "_flush_server_settings_persist"):
+            with contextlib.suppress(Exception):
+                self._flush_server_settings_persist()
         # Cross-section / remote-reader workers
         cs_mgr = getattr(self, "_cs_mgr", None)
         if cs_mgr is not None:

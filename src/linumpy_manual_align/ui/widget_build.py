@@ -12,6 +12,7 @@ from linumpy_manual_align.ui.ui_builder import (
     build_save_row,
     build_scroll_content,
     build_server_group,
+    build_session_group,
     build_xy_page,
     build_z_page,
 )
@@ -39,6 +40,20 @@ def build_manual_align_ui(widget: ManualAlignWidget) -> None:
     widget.pair_combo = nav.pair_combo
     nav.btn_settings.clicked.connect(widget._open_settings_dialog)
     layout.addLayout(nav_layout)
+
+    # ── Session confidence ───────────────────────────────────────────────
+    session_group, session = build_session_group(
+        on_copy_config=widget._copy_config_line,
+        on_dismiss_resume=widget._dismiss_resume,
+    )
+    widget.session_group = session_group
+    widget.session_summary_label = session.session_summary_label
+    widget.resume_block = session.resume_block
+    widget.resume_config_label = session.resume_config_label
+    widget.resume_guidance_label = session.resume_guidance_label
+    widget.btn_copy_config_line = session.btn_copy_config_line
+    widget.btn_dismiss_resume = session.btn_dismiss_resume
+    layout.addWidget(session_group)
 
     # ── Mode toggle buttons ───────────────────────────────────────────────
     has_axis_aips = bool(widget.slice_paths_xz or widget.slice_paths_yz or widget.pair_paths_xz or widget.pair_paths_yz)
@@ -140,6 +155,8 @@ def build_manual_align_ui(widget: ManualAlignWidget) -> None:
     widget.host_edit = srv.host_edit
     widget.host_edit.editingFinished.connect(widget._persist_server_host)
     widget.remote_python_edit = srv.remote_python_edit
+    widget.remote_python_edit.textChanged.connect(widget._schedule_server_settings_persist)
+    widget.remote_python_edit.editingFinished.connect(widget._persist_remote_python)
     widget.btn_download = srv.btn_download
     widget.btn_upload = srv.btn_upload
     widget.server_progress = srv.server_progress
@@ -192,3 +209,5 @@ def build_manual_align_ui(widget: ManualAlignWidget) -> None:
 
     widget.slider_cs_y.valueChanged.connect(_on_y_changed)
     widget.slider_cs_x.valueChanged.connect(_on_x_changed)
+
+    widget._refresh_session_state()

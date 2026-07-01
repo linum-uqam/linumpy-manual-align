@@ -74,6 +74,10 @@ class ProjectionEventMixin:
             self.spin_moving_z.value(),
         )
         self.unsaved_changes.add(mid)
+        if hasattr(self, "uploaded_pairs"):
+            self.uploaded_pairs.discard(mid)
+        if hasattr(self, "_refresh_session_state"):
+            self._refresh_session_state()
         self._update_z_relative_label()
 
         # Re-apply current state to update display (Z-offset affects XZ/YZ views)

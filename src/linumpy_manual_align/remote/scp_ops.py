@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import logging
 import subprocess
+import tarfile
+import uuid
 from pathlib import Path
 
 from qtpy.QtCore import QThread, Signal
@@ -11,6 +13,10 @@ from qtpy.QtCore import QThread, Signal
 from linumpy_manual_align.remote.server_config import ServerConfig
 
 logger = logging.getLogger(__name__)
+
+# Many small files over scp -r are slow and prone to timeout; archive transfer is faster.
+_DEFAULT_SCP_TIMEOUT_SEC = 600
+_ARCHIVE_CREATE_TIMEOUT_SEC = 600
 
 
 class ScpWorker(QThread):
@@ -32,17 +38,43 @@ class ScpWorker(QThread):
         self.transfer_done.emit(ok, msg)
 
 
-def _run_scp(args: list[str], description: str) -> tuple[bool, str]:
-    """Run an scp command and return (success, message)."""
-    cmd = ["scp", *args]
+def _run_ssh(
+    server: ServerConfig,
+    remote_cmd: str,
+    description: str,
+    *,
+    timeout: int = 120,
+) -> tuple[bool, str]:
+    """Run an ssh command on the server host and return (success, message)."""
+    cmd = ["ssh", server.host, remote_cmd]
     logger.info("Running: %s", " ".join(cmd))
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
         if result.returncode == 0:
             return True, f"{description}: OK"
         return False, f"{description}: FAILED\n{result.stderr.strip()}"
     except subprocess.TimeoutExpired:
-        return False, f"{description}: TIMEOUT (>300s)"
+        return False, f"{description}: TIMEOUT (>{timeout}s)"
+    except FileNotFoundError:
+        return False, f"{description}: ssh not found"
+
+
+def _run_scp(
+    args: list[str],
+    description: str,
+    *,
+    timeout: int = _DEFAULT_SCP_TIMEOUT_SEC,
+) -> tuple[bool, str]:
+    """Run an scp command and return (success, message)."""
+    cmd = ["scp", *args]
+    logger.info("Running: %s", " ".join(cmd))
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        if result.returncode == 0:
+            return True, f"{description}: OK"
+        return False, f"{description}: FAILED\n{result.stderr.strip()}"
+    except subprocess.TimeoutExpired:
+        return False, f"{description}: TIMEOUT (>{timeout}s)"
     except FileNotFoundError:
         return False, f"{description}: scp not found"
 
@@ -76,20 +108,42 @@ def download_manual_align_package(
     local_dir = Path(local_dir)
     local_dir.mkdir(parents=True, exist_ok=True)
 
-    remote_pkg = f"{server.remote_output}/make_manual_align_package/manual_align_package"
+    remote_parent = f"{server.remote_output}/make_manual_align_package"
+    archive_name = f".manual_align_download_{uuid.uuid4().hex[:12]}.tar.gz"
+    remote_archive = f"{remote_parent}/{archive_name}"
 
-    # Download entire package recursively
-    ok, msg = _run_scp(
-        ["-r", f"{server.host}:{remote_pkg}/", str(local_dir) + "/"],
-        "Download manual align package",
+    ok, msg = _run_ssh(
+        server,
+        f"tar -czf {remote_archive} -C {remote_parent} manual_align_package",
+        "Create remote package archive",
+        timeout=_ARCHIVE_CREATE_TIMEOUT_SEC,
     )
     if not ok:
         return False, msg
 
+    local_archive = local_dir / archive_name
+    try:
+        ok, msg = _run_scp(
+            [f"{server.host}:{remote_archive}", str(local_archive)],
+            "Download manual align package archive",
+        )
+        if not ok:
+            return False, msg
+
+        with tarfile.open(local_archive, "r:gz") as archive:
+            archive.extractall(local_dir, filter="data")
+    finally:
+        local_archive.unlink(missing_ok=True)
+        _run_ssh(
+            server,
+            f"rm -f {remote_archive}",
+            "Remove remote package archive",
+            timeout=30,
+        )
+
     # Verify we got the expected files
     aips_dir = local_dir / "manual_align_package" / "aips"
     if not aips_dir.exists():
-        # scp -r may place contents directly or in a subdirectory
         aips_dir = local_dir / "aips"
 
     n_aips = len(list(aips_dir.glob("*.npz"))) if aips_dir.exists() else 0
