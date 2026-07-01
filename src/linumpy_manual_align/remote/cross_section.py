@@ -24,7 +24,8 @@ import numpy as np
 from qtpy.QtCore import QObject, Qt, Signal
 
 from linumpy_manual_align.contracts import load_manual_align_metadata
-from linumpy_manual_align.contracts.models import SEVERITY_WARNING
+from linumpy_manual_align.contracts.metadata import NormalizedMetadata
+from linumpy_manual_align.contracts.models import SEVERITY_WARNING, ContractIssue
 from linumpy_manual_align.remote import (
     CrossSectionWorker,
     RemoteSliceReader,
@@ -83,13 +84,15 @@ class CrossSectionManager(QObject):
     # Metadata
     # ------------------------------------------------------------------
 
-    def load_metadata(self, pkg_root: Path) -> None:
-        """Populate remote-reader settings from ``manual_align_metadata.json``.
+    def apply_metadata(self, normalized: NormalizedMetadata, issues: list[ContractIssue]) -> None:
+        """Apply an already-loaded ``(NormalizedMetadata, issues)`` result.
 
-        Tries *pkg_root* first, then *pkg_root.parent* to handle both flat
-        and nested package layouts.
+        Copies the remote-reader fields onto the manager without re-reading the
+        JSON file, so callers that already have a normalized result (e.g.
+        ``widget_server``) avoid a second parse. ``SEVERITY_WARNING`` issues are
+        logged; a *normalized* with ``source_path is None`` leaves defaults
+        untouched.
         """
-        normalized, issues = load_manual_align_metadata(pkg_root)
         for issue in issues:
             if issue.severity == SEVERITY_WARNING:
                 logger.warning("%s: %s", issue.code, issue.message)
@@ -106,6 +109,16 @@ class CrossSectionManager(QObject):
                 self.slices_remote_dir,
                 self.cs_level,
             )
+
+    def load_metadata(self, pkg_root: Path) -> None:
+        """Populate remote-reader settings from ``manual_align_metadata.json``.
+
+        Tries *pkg_root* first, then *pkg_root.parent* to handle both flat
+        and nested package layouts. Thin wrapper that delegates the field
+        assignment to :meth:`apply_metadata`.
+        """
+        normalized, issues = load_manual_align_metadata(pkg_root)
+        self.apply_metadata(normalized, issues)
 
     # ------------------------------------------------------------------
     # Reader lifecycle

@@ -155,7 +155,6 @@ def build_manual_align_ui(widget: ManualAlignWidget) -> None:
     widget.host_edit = srv.host_edit
     widget.host_edit.editingFinished.connect(widget._persist_server_host)
     widget.remote_python_edit = srv.remote_python_edit
-    widget.remote_python_edit.textChanged.connect(widget._schedule_server_settings_persist)
     widget.remote_python_edit.editingFinished.connect(widget._persist_remote_python)
     widget.btn_download = srv.btn_download
     widget.btn_upload = srv.btn_upload

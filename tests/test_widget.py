@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import json
 import shutil
 from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
 
+import linumpy_manual_align.ui.widget_close_guard as widget_close_guard_module
+import linumpy_manual_align.ui.widget_server as widget_server_module
+import linumpy_manual_align.ui.widget_undo_save as widget_undo_save_module
 from linumpy_manual_align.__main__ import parse_args
 from linumpy_manual_align.contracts import (
     SEVERITY_ERROR,
@@ -18,6 +22,11 @@ from linumpy_manual_align.contracts import (
     UploadReadinessReport,
     validate_manual_output,
 )
+from linumpy_manual_align.contracts.layout import (
+    METADATA_FILENAME,
+    TRANSFORM_FILENAME,
+    manual_output_dir,
+)
 from linumpy_manual_align.io.transform_io import save_transform
 from linumpy_manual_align.state import _MAX_UNDO_HISTORY, AlignmentState, UndoStack
 from linumpy_manual_align.ui.widget_close_guard import CloseGuardMixin
@@ -25,9 +34,6 @@ from linumpy_manual_align.ui.widget_mixins import PairNavigationMixin
 from linumpy_manual_align.ui.widget_server import ServerMixin
 from linumpy_manual_align.ui.widget_status import StatusMixin
 from linumpy_manual_align.ui.widget_undo_save import UndoSaveMixin
-import linumpy_manual_align.ui.widget_close_guard as widget_close_guard_module
-import linumpy_manual_align.ui.widget_server as widget_server_module
-import linumpy_manual_align.ui.widget_undo_save as widget_undo_save_module
 
 
 class _SaveWidget(UndoSaveMixin):
@@ -80,8 +86,8 @@ def _make_batch_widget(output_dir: Path, mids: list[int], level: int = 1) -> _Sa
     widget.current_pair_idx = 0
     widget.output_dir = output_dir
     widget.level = level
-    widget.pair_centers = {m: (50.0, 50.0) for m in mids}
-    widget._current_offsets = {m: (0, 0) for m in mids}
+    widget.pair_centers = dict.fromkeys(mids, (50.0, 50.0))
+    widget._current_offsets = dict.fromkeys(mids, (0, 0))
     widget.saved_pairs = set()
     widget.unsaved_changes = set(mids)
     widget.undo_stacks = {
@@ -607,8 +613,8 @@ class TestSaveAllValidation:
         widget.current_pair_idx = 0
         widget.output_dir = tmp_path
         widget.level = 1
-        widget.pair_centers = {m: (50.0, 50.0) for m in mids}
-        widget._current_offsets = {m: (0, 0) for m in mids}
+        widget.pair_centers = dict.fromkeys(mids, (50.0, 50.0))
+        widget._current_offsets = dict.fromkeys(mids, (0, 0))
         widget.saved_pairs = set()
         widget.unsaved_changes = set(mids)
         widget.undo_stacks = {
@@ -1793,7 +1799,7 @@ class TestSessionConfidence:
             raising=False,
         )
         monkeypatch.setattr(widget, "_discover_axis_aip_dirs", lambda _root: None)
-        setattr(widget, "_load_remote_cs_metadata", lambda _root: None)
+        widget._apply_package_metadata = lambda _root, _base: None
         monkeypatch.setattr(widget, "_rebuild_pairs", lambda: None)
 
         widget._on_download_finished(True, "Download complete", local_dir)
@@ -1830,7 +1836,7 @@ class TestSessionConfidence:
             raising=False,
         )
         monkeypatch.setattr(widget, "_discover_axis_aip_dirs", lambda _root: None)
-        setattr(widget, "_load_remote_cs_metadata", lambda _root: None)
+        widget._apply_package_metadata = lambda _root, _base: None
         monkeypatch.setattr(widget, "_rebuild_pairs", lambda: None)
 
         widget._load_existing_package(aips)
@@ -1847,3 +1853,294 @@ class TestSessionConfidence:
         _finish_upload(widget, mids={1, 2}, msg=msg)
 
         assert widget.server_status_label.text == msg
+
+
+_MISSING_METADATA_MSG = (
+    "No manual_align_metadata.json found at package root or parent directory."
+)
+_INVALID_JSON_MSG = "manual_align_metadata.json is not valid JSON; using defaults."
+
+
+def _make_package_metadata_widget(
+    tmp_path: Path,
+    *,
+    level: int = 2,
+    pairs: list[tuple[int, int]] | None = None,
+) -> ServerMixin:
+    """Minimal ServerMixin widget for package metadata wiring tests."""
+    from linumpy_manual_align.remote.cross_section import CrossSectionManager
+
+    widget = object.__new__(ServerMixin)
+    widget.output_dir = tmp_path
+    widget.pairs = pairs or [(0, 1)]
+    widget.level = level
+    widget.server_status_label = _StatusLabel()
+    widget.viewer = _Viewer()
+    widget._cs_mgr = CrossSectionManager()
+    widget.saved_pairs = set()
+    widget.slice_ids = []
+    widget.existing_transforms = {}
+    return widget
+
+
+def _patch_package_discovery(monkeypatch: pytest.MonkeyPatch, widget: ServerMixin, aips: Path) -> None:
+    monkeypatch.setattr(
+        widget_server_module,
+        "discover_aips",
+        lambda _path: {0: aips / "slice_000.npz"},
+        raising=False,
+    )
+    monkeypatch.setattr(
+        widget_server_module,
+        "discover_pair_aips",
+        lambda _path: {(0, 1): (aips / "slice_000.npz", aips / "slice_000.npz")},
+        raising=False,
+    )
+    widget._discover_axis_aip_dirs = lambda _root: None
+    widget._refresh_saved_pairs = lambda: None
+    widget._rebuild_pairs = lambda: None
+    widget._refresh_session_state = lambda: None
+
+
+class TestPackageMetadataWiring:
+    """Server load paths use load_manual_align_metadata (CONT-05, CONT-06)."""
+
+    def test_explicit_level_applied_from_metadata(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        widget = _make_package_metadata_widget(tmp_path, level=2)
+        aips = tmp_path / "manual_align_package" / "aips"
+        aips.mkdir(parents=True)
+        (aips / "slice_000.npz").touch()
+        (aips.parent / METADATA_FILENAME).write_text(json.dumps({"pyramid_level": 5}))
+        _patch_package_discovery(monkeypatch, widget, aips)
+
+        widget._load_existing_package(aips, base_status="Package loaded")
+
+        assert widget.level == 5
+
+    def test_level_preserved_when_metadata_missing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        widget = _make_package_metadata_widget(tmp_path, level=2)
+        aips = tmp_path / "manual_align_package" / "aips"
+        aips.mkdir(parents=True)
+        (aips / "slice_000.npz").touch()
+        _patch_package_discovery(monkeypatch, widget, aips)
+
+        widget._load_existing_package(aips, base_status="Package loaded")
+
+        assert widget.level == 2
+
+    def test_level_preserved_when_metadata_has_no_level_key(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        widget = _make_package_metadata_widget(tmp_path, level=2)
+        aips = tmp_path / "manual_align_package" / "aips"
+        aips.mkdir(parents=True)
+        (aips / "slice_000.npz").touch()
+        (aips.parent / METADATA_FILENAME).write_text(
+            json.dumps({"slices_remote_dir": "/remote/slices"})
+        )
+        _patch_package_discovery(monkeypatch, widget, aips)
+
+        widget._load_existing_package(aips, base_status="Package loaded")
+
+        assert widget.level == 2
+
+    def test_missing_metadata_surfaces_warning_on_load_existing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        widget = _make_package_metadata_widget(tmp_path)
+        aips = tmp_path / "manual_align_package" / "aips"
+        aips.mkdir(parents=True)
+        (aips / "slice_000.npz").touch()
+        base = "Existing package loaded"
+        _patch_package_discovery(monkeypatch, widget, aips)
+
+        widget._load_existing_package(aips, base_status=base)
+
+        label = widget.server_status_label.text
+        assert base in label
+        assert _MISSING_METADATA_MSG in label
+        assert "metadata.missing" not in label
+
+    def test_invalid_json_surfaces_warning_on_load_existing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        widget = _make_package_metadata_widget(tmp_path)
+        aips = tmp_path / "manual_align_package" / "aips"
+        aips.mkdir(parents=True)
+        (aips / "slice_000.npz").touch()
+        (aips.parent / METADATA_FILENAME).write_text("{ not valid json")
+        _patch_package_discovery(monkeypatch, widget, aips)
+
+        widget._load_existing_package(aips, base_status="Loaded")
+
+        label = widget.server_status_label.text
+        assert _INVALID_JSON_MSG in label
+        assert "metadata.invalid_json" not in label
+
+    def test_download_finish_composes_base_status_and_warnings(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        widget = _make_package_metadata_widget(tmp_path)
+        widget.btn_download = _ButtonStub()
+        widget.btn_upload = _ButtonStub()
+        widget.server_progress = _ProgressStub()
+        widget._worker = None
+
+        local_dir = tmp_path / "server_package"
+        aips = local_dir / "manual_align_package" / "aips"
+        aips.mkdir(parents=True)
+        (aips / "slice_000.npz").touch()
+        _patch_package_discovery(monkeypatch, widget, aips)
+
+        base = "Download complete"
+        widget._on_download_finished(True, base, local_dir)
+
+        label = widget.server_status_label.text
+        assert base in label
+        assert _MISSING_METADATA_MSG in label
+
+    def test_apply_metadata_called_without_second_parse(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        widget = _make_package_metadata_widget(tmp_path)
+        aips = tmp_path / "manual_align_package" / "aips"
+        aips.mkdir(parents=True)
+        (aips / "slice_000.npz").touch()
+        (aips.parent / METADATA_FILENAME).write_text(json.dumps({"pyramid_level": 1}))
+        _patch_package_discovery(monkeypatch, widget, aips)
+
+        apply_calls: list[tuple] = []
+
+        def record_apply(normalized, issues) -> None:
+            apply_calls.append((normalized, issues))
+
+        widget._cs_mgr.apply_metadata = record_apply
+
+        widget._load_existing_package(aips, base_status="Loaded")
+
+        assert len(apply_calls) == 1
+        normalized, _issues = apply_calls[0]
+        assert normalized.pyramid_level == 1
+        assert normalized.pyramid_level_explicit is True
+
+
+class TestStartupMetadataWarnings:
+    """Startup cached load preserves ContractIssue warnings (D-01, D-02)."""
+
+    def test_startup_preserves_missing_metadata_warning(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Startup branch passes base_status so warnings are not clobbered."""
+        from linumpy_manual_align.remote.cross_section import CrossSectionManager
+        from linumpy_manual_align.ui.widget import ManualAlignWidget
+
+        output_dir = tmp_path / "sub" / "manual_transforms"
+        output_dir.mkdir(parents=True)
+        aips = tmp_path / "sub" / "server_package" / "manual_align_package" / "aips"
+        aips.mkdir(parents=True)
+        (aips / "slice_000.npz").touch()
+
+        widget = ManualAlignWidget.__new__(ManualAlignWidget)
+        widget.output_dir = output_dir
+        widget.level = 2
+        widget.server_config = MagicMock()
+        widget.pairs = []
+        widget.server_status_label = _StatusLabel()
+        widget.viewer = _Viewer()
+        widget._cs_mgr = CrossSectionManager()
+        widget.saved_pairs = set()
+        widget.existing_transforms = {}
+        _patch_package_discovery(monkeypatch, widget, aips)
+
+        existing = widget._find_existing_package()
+        assert existing is not None
+        base_status = f"Existing package loaded from {existing.parent}"
+        widget._load_existing_package(existing, base_status=base_status)
+
+        label = widget.server_status_label.text
+        assert "Existing package loaded from" in label
+        assert _MISSING_METADATA_MSG in label
+        assert widget.level == 2
+
+
+def _make_pair_loading_widget(output_dir: Path):
+    """Build a minimal PairLoadingMixin widget for saved-pair discovery tests."""
+    from linumpy_manual_align.ui.widget_pair_loading import PairLoadingMixin
+
+    class _PairLoadingWidget(PairLoadingMixin):
+        pass
+
+    widget = object.__new__(_PairLoadingWidget)
+    widget.output_dir = output_dir
+    widget.saved_pairs = set()
+    return widget
+
+
+def _write_transform(slice_dir: Path) -> None:
+    """Create a slice directory containing a transform.tfm file."""
+    slice_dir.mkdir(parents=True, exist_ok=True)
+    (slice_dir / TRANSFORM_FILENAME).write_text("stub", encoding="utf-8")
+
+
+class TestSavedPairsDiscovery:
+    """Contract-helper-based saved-pair discovery (CONT-07, D-10)."""
+
+    def test_saved_pairs_added_when_transform_present(self, tmp_path: Path) -> None:
+        """A slice_z## dir built via manual_output_dir with transform.tfm is discovered."""
+        _write_transform(manual_output_dir(tmp_path, 1))
+        widget = _make_pair_loading_widget(tmp_path)
+
+        widget._refresh_saved_pairs()
+
+        assert 1 in widget.saved_pairs
+
+    def test_saved_pairs_skips_dir_without_transform(self, tmp_path: Path) -> None:
+        """A slice_z## dir WITHOUT transform.tfm is not added (transform.tfm filter)."""
+        manual_output_dir(tmp_path, 2).mkdir(parents=True)
+        widget = _make_pair_loading_widget(tmp_path)
+
+        widget._refresh_saved_pairs()
+
+        assert 2 not in widget.saved_pairs
+        assert widget.saved_pairs == set()
+
+    def test_saved_pairs_ignores_non_conforming_names(self, tmp_path: Path) -> None:
+        """Directories not matching the strict slice_z layout are ignored."""
+        # ``slice_1`` (missing ``z``) and ``slicez01`` (missing underscore) are
+        # non-conforming and must never contribute a moving id, even with a
+        # transform.tfm present.
+        _write_transform(tmp_path / "slice_1")
+        _write_transform(tmp_path / "slicez01")
+        widget = _make_pair_loading_widget(tmp_path)
+
+        widget._refresh_saved_pairs()
+
+        assert widget.saved_pairs == set()
+
+    def test_saved_pairs_strict_slice_z_parsing(self, tmp_path: Path) -> None:
+        """Pins the strict ``slice_z<digits>`` contract (discover_manual_slice_dirs).
+
+        Both ``slice_z01`` and ``slice_z001`` parse to moving id 1; only dirs
+        containing transform.tfm are counted, and non ``slice_z`` names are
+        excluded entirely.
+        """
+        _write_transform(manual_output_dir(tmp_path, 1))  # slice_z01
+        _write_transform(tmp_path / "slice_z001")  # also parses to id 1
+        _write_transform(tmp_path / "notaslice")  # excluded
+        widget = _make_pair_loading_widget(tmp_path)
+
+        widget._refresh_saved_pairs()
+
+        assert widget.saved_pairs == {1}
+
+    def test_saved_pairs_missing_output_dir_is_noop(self, tmp_path: Path) -> None:
+        """Discovery on a non-existent output_dir leaves saved_pairs empty."""
+        widget = _make_pair_loading_widget(tmp_path / "does_not_exist")
+
+        widget._refresh_saved_pairs()
+
+        assert widget.saved_pairs == set()

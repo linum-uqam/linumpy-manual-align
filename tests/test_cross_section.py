@@ -6,9 +6,16 @@ import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import logging
+
 import numpy as np
 import pytest
 
+from linumpy_manual_align.contracts.metadata import (
+    NormalizedMetadata,
+    load_manual_align_metadata,
+)
+from linumpy_manual_align.contracts.models import SEVERITY_WARNING, ContractIssue
 from linumpy_manual_align.remote.cross_section import CrossSectionManager
 
 
@@ -90,6 +97,81 @@ class TestLoadMetadataDelegation:
         assert mgr.slices_remote_dir == "/remote/slices"
         assert mgr.cs_level == 0
         assert mgr.slice_filenames[1] == "slice_z01.ome.zarr"
+
+
+class TestApplyMetadata:
+    """apply_metadata applies an already-loaded (NormalizedMetadata, issues) tuple (D-07)."""
+
+    def test_none_source_leaves_defaults(self, qapp) -> None:
+        mgr = CrossSectionManager()
+        normalized = NormalizedMetadata()  # source_path=None
+        mgr.apply_metadata(normalized, [])
+        assert mgr.slices_remote_dir is None
+        assert mgr.cs_level == 0
+
+    def test_missing_metadata_tuple_leaves_defaults(self, tmp_path: Path, qapp) -> None:
+        mgr = CrossSectionManager()
+        normalized, issues = load_manual_align_metadata(tmp_path)  # empty dir
+        mgr.apply_metadata(normalized, issues)
+        assert mgr.slices_remote_dir is None
+        assert mgr.cs_level == 0
+
+    def test_populated_metadata_copies_all_fields(self, tmp_path: Path, qapp) -> None:
+        normalized = NormalizedMetadata(
+            pyramid_level=2,
+            pyramid_level_explicit=True,
+            slices_remote_dir="/remote/slices",
+            slice_filenames={0: "slice_z00.ome.zarr"},
+            slice_remote_paths={1: "/abs/x"},
+            interpolated_slice_ids=frozenset({3}),
+            package_root=tmp_path,
+            source_path=tmp_path / "manual_align_metadata.json",
+        )
+        mgr = CrossSectionManager()
+        mgr.apply_metadata(normalized, [])
+        assert mgr.slices_remote_dir == "/remote/slices"
+        assert mgr.cs_level == 2
+        assert mgr.slice_filenames[0] == "slice_z00.ome.zarr"
+        assert mgr.slice_remote_paths[1] == "/abs/x"
+        assert 3 in mgr.interpolated_slice_ids
+
+    def test_warning_issue_is_logged(self, qapp, caplog) -> None:
+        mgr = CrossSectionManager()
+        normalized = NormalizedMetadata()
+        issue = ContractIssue(
+            severity=SEVERITY_WARNING,
+            code="metadata.missing",
+            message="No manual_align_metadata.json found at package root or parent directory.",
+        )
+        with caplog.at_level(logging.WARNING, logger="linumpy_manual_align.remote.cross_section"):
+            mgr.apply_metadata(normalized, [issue])
+        assert any(
+            "No manual_align_metadata.json found" in record.getMessage()
+            for record in caplog.records
+        )
+
+    def test_load_metadata_matches_apply_metadata(self, tmp_path: Path, qapp) -> None:
+        meta = {
+            "slices_remote_dir": "/remote/slices",
+            "cross_section_level": 2,
+            "slice_filenames": {"0": "slice_z00.ome.zarr"},
+            "slice_remote_paths": {"1": "/abs/x"},
+            "interpolated_slice_ids": [3],
+        }
+        (tmp_path / "manual_align_metadata.json").write_text(json.dumps(meta))
+
+        via_load = CrossSectionManager()
+        via_load.load_metadata(tmp_path)
+
+        normalized, issues = load_manual_align_metadata(tmp_path)
+        via_apply = CrossSectionManager()
+        via_apply.apply_metadata(normalized, issues)
+
+        assert via_load.slices_remote_dir == via_apply.slices_remote_dir == "/remote/slices"
+        assert via_load.cs_level == via_apply.cs_level == 2
+        assert via_load.slice_filenames == via_apply.slice_filenames == {0: "slice_z00.ome.zarr"}
+        assert via_load.slice_remote_paths == via_apply.slice_remote_paths == {1: "/abs/x"}
+        assert via_load.interpolated_slice_ids == via_apply.interpolated_slice_ids == {3}
 
 
 # ---------------------------------------------------------------------------

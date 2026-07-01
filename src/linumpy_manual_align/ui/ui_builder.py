@@ -554,11 +554,17 @@ def build_server_group(
 
     # Pre-populate from server_config if available
     if server_config is not None:
-        if hasattr(server_config, "config_path") and server_config.config_path:
-            config_path_edit.setText(str(server_config.config_path))
-        if hasattr(server_config, "host"):
-            host_from_config = str(getattr(server_config, "host", "")).strip()
-            host_edit.setText(host_from_config or default_host_display())
+        host_edit.blockSignals(True)
+        remote_python_edit.blockSignals(True)
+        try:
+            if hasattr(server_config, "config_path") and server_config.config_path:
+                config_path_edit.setText(str(server_config.config_path))
+            if hasattr(server_config, "host"):
+                host_from_config = str(getattr(server_config, "host", "")).strip()
+                host_edit.setText(host_from_config or default_host_display())
+        finally:
+            host_edit.blockSignals(False)
+            remote_python_edit.blockSignals(False)
     else:
         btn_download.setEnabled(False)
         btn_upload.setEnabled(False)

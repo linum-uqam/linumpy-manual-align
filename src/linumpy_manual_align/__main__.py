@@ -218,10 +218,14 @@ def main(argv: list[str] | None = None) -> None:
 
     # Import napari late — startup takes a moment
     import napari
+    from qtpy.QtWidgets import QApplication
 
     from linumpy_manual_align.api import create_manual_align_widget
     from linumpy_manual_align.remote import parse_server_config
     from linumpy_manual_align.ui.napari_menus import add_manual_align_settings_action
+
+    # QSettings reads are unreliable on macOS before a QApplication exists.
+    _app = QApplication.instance() or QApplication([])
 
     # Parse server config if provided
     server_config = None

@@ -22,7 +22,9 @@ class StatusMixin:
         mode_label = {"xy": "XY", "xz": "XZ", "yz": "YZ"}.get(self._projection_mode, "XY")
         lines = [f"<b>Pair {self.current_pair_idx + 1}/{len(self.pairs)}: z{fid:02d} → z{mid:02d}  [{mode_label}]</b>"]
         if self.level == 0:
-            lines.append(f"tx={state.tx:.1f}  ty={state.ty:.1f}  rot={state.rotation:.2f}°")
+            lines.append(
+                f"<i>Full resolution (level 0)</i> — tx={state.tx:.1f}  ty={state.ty:.1f}  rot={state.rotation:.2f}°"
+            )
         else:
             lines.append(f"Working (level {self.level}): tx={state.tx:.1f}  ty={state.ty:.1f}  rot={state.rotation:.2f}°")
             lines.append(

@@ -6,7 +6,8 @@ from pathlib import Path
 
 from qtpy.QtWidgets import QFileDialog, QMessageBox
 
-from linumpy_manual_align.contracts import UploadReadinessReport, assess_upload_readiness, moving_ids_from_slice_dirs
+from linumpy_manual_align.contracts import UploadReadinessReport, assess_upload_readiness, load_manual_align_metadata, moving_ids_from_slice_dirs
+from linumpy_manual_align.contracts.models import SEVERITY_WARNING
 from linumpy_manual_align.io.transform_io import discover_aips, discover_pair_aips, discover_transforms
 from linumpy_manual_align.remote import ScpWorker
 from linumpy_manual_align.settings import settings
@@ -62,18 +63,6 @@ class ServerMixin:
             if not pkg_aips.exists():
                 pkg_aips = local_dir / "aips"
             if pkg_aips.exists():
-                # Update pyramid level from package metadata so save/load scaling is correct.
-                metadata_path = pkg_aips.parent / "manual_align_metadata.json"
-                if metadata_path.exists():
-                    import json
-
-                    try:
-                        meta = json.loads(metadata_path.read_text())
-                        if "pyramid_level" in meta:
-                            self.level = int(meta["pyramid_level"])
-                    except Exception:
-                        pass
-
                 self.aips_dir = pkg_aips
                 self.slice_paths = discover_aips(pkg_aips)
                 self.slice_ids = list(self.slice_paths.keys())
@@ -82,8 +71,7 @@ class ServerMixin:
                 # Discover axis-specific AIPs
                 self._discover_axis_aip_dirs(pkg_aips.parent)
 
-                # Load remote zarr metadata for interactive cross-section sliders
-                self._load_remote_cs_metadata(pkg_aips.parent)
+                self._apply_package_metadata(pkg_aips.parent, msg)
 
                 # Reload transforms too if available
                 pkg_tfm = local_dir / "manual_align_package" / "transforms"
@@ -277,10 +265,11 @@ class ServerMixin:
         # Check if a package was already downloaded for this config
         existing = self._find_existing_package()
         if existing is not None:
-            self.server_status_label.setText(
-                f"Configured: {cfg.subject_id} @ {cfg.host} — existing package found at {existing}, loading…"
+            base_status = (
+                f"Configured: {cfg.subject_id} @ {cfg.host} — "
+                f"existing package found at {existing}, loading…"
             )
-            self._load_existing_package(existing)
+            self._load_existing_package(existing, base_status=base_status)
         else:
             self.server_status_label.setText(f"Configured: {cfg.subject_id} @ {cfg.host}")
 
@@ -298,20 +287,22 @@ class ServerMixin:
                 return path
         return None
 
-    def _load_existing_package(self: ManualAlignWidget, aips_dir: Path) -> None:
+    def _apply_package_metadata(self: ManualAlignWidget, pkg_root: Path, base_status: str) -> None:
+        """Load package metadata once and apply level, cross-section, and warning text."""
+        normalized, issues = load_manual_align_metadata(pkg_root)
+        if normalized.pyramid_level_explicit:
+            self.level = normalized.pyramid_level
+        self._cs_mgr.apply_metadata(normalized, issues)
+        warnings = [issue.message for issue in issues if issue.severity == SEVERITY_WARNING]
+        if warnings:
+            self.server_status_label.setText(base_status + "\n" + "\n".join(warnings))
+        else:
+            self.server_status_label.setText(base_status)
+
+    def _load_existing_package(
+        self: ManualAlignWidget, aips_dir: Path, *, base_status: str = "Existing package loaded"
+    ) -> None:
         """Load a previously downloaded package without hitting the server."""
-        # Update pyramid level from package metadata so status display is correct.
-        metadata_path = aips_dir.parent / "manual_align_metadata.json"
-        if metadata_path.exists():
-            import json
-
-            try:
-                meta = json.loads(metadata_path.read_text())
-                if "pyramid_level" in meta:
-                    self.level = int(meta["pyramid_level"])
-            except Exception:
-                pass
-
         self.aips_dir = aips_dir
         self.slice_paths = discover_aips(aips_dir)
         self.slice_ids = list(self.slice_paths.keys())
@@ -327,8 +318,7 @@ class ServerMixin:
                 self.existing_transforms = discover_transforms(tfm_candidate)
                 break
 
-        # Load remote zarr metadata for interactive cross-section mode
-        self._load_remote_cs_metadata(aips_dir.parent)
+        self._apply_package_metadata(aips_dir.parent, base_status)
 
         self._refresh_saved_pairs()
         self._rebuild_pairs()
@@ -339,7 +329,6 @@ class ServerMixin:
         """Update server config host when the user edits the host field."""
         if self.server_config is not None:
             self.server_config.host = text.strip()
-        self._schedule_server_settings_persist()
 
     def _schedule_server_settings_persist(self: ManualAlignWidget) -> None:
         """Debounce writes of global server dock fields to QSettings."""

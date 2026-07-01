@@ -191,6 +191,8 @@ class ManualAlignWidget(
             if self.server_config is not None and not self.pairs:
                 existing = self._find_existing_package()
                 if existing is not None:
-                    self._load_existing_package(existing)
-                    self.server_status_label.setText(f"Existing package loaded from {existing.parent}")
+                    base_status = f"Existing package loaded from {existing.parent}"
+                    self._load_existing_package(existing, base_status=base_status)
+                    if self.pairs:
+                        self._load_pair(0)
             self._update_status()

@@ -7,6 +7,7 @@ from pathlib import Path
 
 import numpy as np
 
+from linumpy_manual_align.contracts.layout import manual_output_dir
 from linumpy_manual_align.io.image_utils import enhance_aip, normalize_aip
 from linumpy_manual_align.io.transform_io import load_center_pos_from_npz
 from linumpy_manual_align.ui.widget_typing import ManualAlignWidget
@@ -64,7 +65,7 @@ class CrossSectionMixin:
 
         # Priority 2: disk (already a slider value)
         if self.output_dir is not None:
-            cs_path = self.output_dir / f"slice_z{mid:02d}" / "cs_position.txt"
+            cs_path = manual_output_dir(self.output_dir, mid) / "cs_position.txt"
             if cs_path.exists():
                 try:
                     vals = np.loadtxt(str(cs_path), dtype=int)
@@ -251,7 +252,7 @@ class CrossSectionMixin:
         if self.output_dir is None:
             return
         cs_y, cs_x = self._cs_positions.get(mid, (self._cross_section_y, self._cross_section_x))
-        out_dir = self.output_dir / f"slice_z{mid:02d}"
+        out_dir = manual_output_dir(self.output_dir, mid)
         out_dir.mkdir(parents=True, exist_ok=True)
         np.savetxt(str(out_dir / "cs_position.txt"), [cs_y, cs_x], fmt="%d")
 

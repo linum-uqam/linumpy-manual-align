@@ -4,11 +4,16 @@ from __future__ import annotations
 
 import contextlib
 import logging
-import re
 from pathlib import Path
 
 import numpy as np
 
+from linumpy_manual_align.contracts.layout import (
+    OFFSETS_FILENAME,
+    TRANSFORM_FILENAME,
+    discover_manual_slice_dirs,
+    manual_output_dir,
+)
 from linumpy_manual_align.io.image_utils import (
     content_bbox,
     enhance_aip,
@@ -34,13 +39,10 @@ class PairLoadingMixin:
 
     def _refresh_saved_pairs(self: ManualAlignWidget) -> None:
         """Scan output_dir and pre-populate saved_pairs with already-written transforms."""
-        if not self.output_dir.exists():
-            return
-        pattern = re.compile(r"slice_z(\d+)$")
-        for p in self.output_dir.iterdir():
-            m = pattern.match(p.name)
-            if m and (p / "transform.tfm").exists():
-                self.saved_pairs.add(int(m.group(1)))
+        discovered, _issues = discover_manual_slice_dirs(self.output_dir)
+        for moving_id, slice_dir in discovered.items():
+            if (slice_dir / TRANSFORM_FILENAME).is_file():
+                self.saved_pairs.add(moving_id)
 
     def _discover_axis_aip_dirs(self: ManualAlignWidget, pkg_root: Path) -> None:
         """Discover aips_xz/ and aips_yz/ directories in the package root."""
@@ -63,7 +65,7 @@ class PairLoadingMixin:
         """Return the best available initial AlignmentState for *mid*.
 
         Priority:
-        1. A previously saved manual transform in ``output_dir/slice_z{mid:02d}/transform.tfm``.
+        1. A previously saved manual transform in ``manual_output_dir(output_dir, mid) / TRANSFORM_FILENAME``.
         2. The automated pipeline transform from ``existing_transforms``.
         3. Zero state (no transform available).
 
@@ -74,7 +76,7 @@ class PairLoadingMixin:
         img_center = self.pair_centers.get(mid)
 
         # 1. Previously saved manual transform takes priority
-        manual_tfm = self.output_dir / f"slice_z{mid:02d}" / "transform.tfm"
+        manual_tfm = manual_output_dir(self.output_dir, mid) / TRANSFORM_FILENAME
         if manual_tfm.exists():
             tx, ty, rot, tfm_center = load_transform(manual_tfm)
             if img_center is not None:
@@ -266,7 +268,7 @@ class PairLoadingMixin:
 
         # Load Z-offsets for this pair — prefer a manually saved offsets.txt
         if mid not in self._current_offsets:
-            manual_offsets_path = self.output_dir / f"slice_z{mid:02d}" / "offsets.txt"
+            manual_offsets_path = manual_output_dir(self.output_dir, mid) / OFFSETS_FILENAME
             if manual_offsets_path.exists():
                 offsets = load_offsets(manual_offsets_path)
             elif mid in self.existing_transforms:
