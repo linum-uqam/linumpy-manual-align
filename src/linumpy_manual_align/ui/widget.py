@@ -176,6 +176,7 @@ class ManualAlignWidget(
         self._sync_server_config_host_from_ui()
         self._install_keybindings()
         self._install_close_guard()
+        self._install_quit_cleanup()
         settings.changed.connect(self._on_settings_changed)
         if self.pairs:
             self._load_pair(0)

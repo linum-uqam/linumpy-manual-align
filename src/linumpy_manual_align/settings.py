@@ -38,7 +38,7 @@ DEFAULTS: dict[str, int | float | str] = {
     "shortcuts/cs_nudge_fine_px": 1,
     # Cross-section prefetch / cache (spacing along the axis uses shortcuts/cs_nudge_px)
     "prefetch/steps": 5,
-    # evict_radius = evict_radius_multiplier * cs_nudge_px
+    # evict radius = multiplier * cs_nudge_px
     "prefetch/evict_radius_multiplier": 15,
     # Spinbox single-step increments
     "spin/tx_ty_step": 1.0,
@@ -48,6 +48,8 @@ DEFAULTS: dict[str, int | float | str] = {
     "server/default_host": "",
     # Must be set to the server's linumpy venv (zarr, ome-zarr, …); see remote/cs_script.
     "server/remote_python": "",
+    # Base path for remote workspaces, e.g. /scratch or /scratch_nvme
+    "server/remote_workspace_base": "/scratch",
 }
 
 

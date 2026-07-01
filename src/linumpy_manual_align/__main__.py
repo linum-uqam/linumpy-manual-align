@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Interactive manual slice alignment tool using napari.
+r"""Interactive manual slice alignment tool using napari.
 
 Displays consecutive common-space slices as red/green AIP (average intensity
 projection) overlays.  The user adjusts translation and rotation of the moving
@@ -10,14 +10,14 @@ with the linumpy stacking pipeline (linum_stack_slices_motor.py).
 
 Usage
 -----
-    linumpy-manual-align \\
-        --data_package /path/to/manual_align_package/ \\
+    linumpy-manual-align \
+        --data_package /path/to/manual_align_package/ \
         --server_config ~/Downloads/sub-22/nextflow.config
 
     # Or directly from OME-Zarr volumes (requires the ome-zarr extra):
-    linumpy-manual-align \\
-        --input_dir /path/to/bring_to_common_space/ \\
-        --transforms_dir /path/to/register_pairwise/ \\
+    linumpy-manual-align \
+        --input_dir /path/to/bring_to_common_space/ \
+        --transforms_dir /path/to/register_pairwise/ \
         --level 1
 
 After saving, use the Upload button (if --server_config provided) or manually
@@ -31,8 +31,46 @@ import argparse
 import logging
 from pathlib import Path
 
+from linumpy_manual_align.contracts import MANUAL_TRANSFORMS_DIRNAME, load_manual_align_metadata
+from linumpy_manual_align.contracts.models import SEVERITY_WARNING
+
+
+logger = logging.getLogger(__name__)
+
+
+def resolve_output_dir(
+    data_package: Path | None,
+    input_dir: Path | None,
+    server_config: Path | None,
+) -> Path:
+    """Resolve the manual-transforms output directory using contract layout constants."""
+    if data_package is not None:
+        pkg = Path(data_package)
+        if pkg.parent.name == "server_package":
+            return pkg.parent.parent / MANUAL_TRANSFORMS_DIRNAME
+        return pkg / MANUAL_TRANSFORMS_DIRNAME
+    if input_dir is not None:
+        return Path(input_dir).parent / MANUAL_TRANSFORMS_DIRNAME
+    return Path(server_config).parent / MANUAL_TRANSFORMS_DIRNAME
+
+
+def resolve_package_level(data_package: Path | None) -> int | None:
+    """Return the normalized package level when metadata specifies one, else None."""
+    if data_package is None:
+        return None
+    normalized, issues = load_manual_align_metadata(Path(data_package))
+    for issue in issues:
+        if issue.severity == SEVERITY_WARNING:
+            logger.warning("%s: %s", issue.code, issue.message)
+    if normalized.source_path is None:
+        return None
+    if not normalized.pyramid_level_explicit:
+        return None
+    return normalized.pyramid_level
+
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    """Parse command-line arguments and return the parsed namespace."""
     p = argparse.ArgumentParser(
         description="Interactive manual slice alignment (napari).",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -59,8 +97,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--level",
         type=int,
-        default=1,
-        help="Pyramid level to use (0=full, 1=2x downsample, ...). Default: 1",
+        default=None,
+        help=(
+            "Pyramid level to use (0=full, 1=2x downsample, ...). "
+            "When omitted, the level recorded in the data package metadata is "
+            "used, otherwise it defaults to 1."
+        ),
     )
     p.add_argument(
         "--slices",
@@ -93,6 +135,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def main(argv: list[str] | None = None) -> None:
+    """Entry point: parse arguments, configure logging, launch the napari viewer."""
     args = parse_args(argv)
 
     if args.debug:
@@ -122,13 +165,10 @@ def main(argv: list[str] | None = None) -> None:
             if pkg_tfm.exists():
                 args.transforms_dir = pkg_tfm
         # Read level from package metadata if not explicitly set
-        metadata_path = pkg / "manual_align_metadata.json"
-        if metadata_path.exists():
-            import json
-
-            metadata = json.loads(metadata_path.read_text())
-            if args.level == 1 and "pyramid_level" in metadata:
-                args.level = metadata["pyramid_level"]
+        if args.level is None:
+            pkg_level = resolve_package_level(pkg)
+            if pkg_level is not None:
+                args.level = pkg_level
     elif args.input_dir is None and args.server_config is None:
         from qtpy.QtWidgets import QApplication, QFileDialog, QMessageBox
 
@@ -160,15 +200,13 @@ def main(argv: list[str] | None = None) -> None:
                 pkg_tfm = pkg / "transforms"
                 if pkg_tfm.exists():
                     args.transforms_dir = pkg_tfm
+            if args.level is None:
+                pkg_level = resolve_package_level(pkg)
+                if pkg_level is not None:
+                    args.level = pkg_level
 
     if args.output_dir is None:
-        if args.data_package is not None:
-            args.output_dir = Path(args.data_package) / "manual_transforms"
-        elif args.input_dir is not None:
-            args.output_dir = args.input_dir.parent / "manual_transforms"
-        else:
-            # server-config-only startup — default output alongside the config file
-            args.output_dir = Path(args.server_config).parent / "manual_transforms"
+        args.output_dir = resolve_output_dir(args.data_package, args.input_dir, args.server_config)
 
     # Fix Qt settings scope before any code imports :data:`linumpy_manual_align.settings.settings`
     # (the widget pulls it in via :mod:`linumpy_manual_align.api`). Without this, macOS
@@ -194,7 +232,13 @@ def main(argv: list[str] | None = None) -> None:
         server_config = parse_server_config(
             args.server_config,
             host=str(settings.get("server/default_host")).strip(),
+            remote_base=str(settings.get("server/remote_workspace_base")),
         )
+
+    # Fall back to the historical default when neither the user nor the package
+    # metadata specified a pyramid level.
+    if args.level is None:
+        args.level = 1
 
     viewer = napari.Viewer(title="Manual Slice Alignment")
 

@@ -17,6 +17,8 @@ from linumpy_manual_align.ui.widget_typing import ManualAlignWidget
 
 
 class OverlayStateMixin:
+    """Mixin that builds and refreshes the composite image overlay (color, diff, checkerboard)."""
+
     def _make_shifted_moving(self: ManualAlignWidget, state: AlignmentState) -> np.ndarray:
         """Return the moving AIP with rotation + pixel-level shift baked in (for composite modes)."""
         moving = self._original_moving_aip
@@ -62,7 +64,10 @@ class OverlayStateMixin:
             return
         shifted = self._make_shifted_moving(state)
         self._composite_layer.data = build_overlay(
-            self._original_fixed_aip, shifted, mode=self._overlay_mode, tile_size=self.spin_tile.value()
+            self._original_fixed_aip,
+            shifted,
+            mode=self._overlay_mode,
+            tile_size=self.spin_tile.value(),
         )
 
     # ----- State application -----

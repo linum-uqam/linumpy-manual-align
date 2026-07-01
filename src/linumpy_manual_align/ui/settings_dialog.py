@@ -17,6 +17,7 @@ from __future__ import annotations
 import sys
 
 from qtpy.QtCore import Qt
+from qtpy.QtGui import QShowEvent
 from qtpy.QtWidgets import (
     QDialog,
     QDialogButtonBox,
@@ -255,6 +256,7 @@ def _build_server_tab(widgets: dict) -> QWidget:
     for key, label in [
         ("server/default_host", "Default host:"),
         ("server/remote_python", "Remote Python path:"),
+        ("server/remote_workspace_base", "Remote workspace base:"),
     ]:
         le = _line_edit(key)
         widgets[key] = le
@@ -265,7 +267,9 @@ def _build_server_tab(widgets: dict) -> QWidget:
         "<b>Remote Python</b> is required for SSH cross-sections: it must be the interpreter "
         "where linumpy, zarr, ome-zarr, etc. are installed (typically your linumpy repo "
         "<code>.venv/bin/python</code> on the server). System <code>python3</code> will not work. "
-        "Alternatively set <code>LINUMPY_MANUAL_ALIGN_REMOTE_PYTHON</code> (overrides this field).</i>"
+        "Alternatively set <code>LINUMPY_MANUAL_ALIGN_REMOTE_PYTHON</code> (overrides this field).<br>"
+        "<b>Remote workspace base</b> is the scratch disk root on the server, "
+        "e.g. <code>/scratch</code> or <code>/scratch_nvme</code>.</i>"
     )
     note.setWordWrap(True)
     layout.addWidget(group)
@@ -364,6 +368,7 @@ class SettingsDialog(QDialog):
     # the dialog is opened (in case settings changed externally).
     # ------------------------------------------------------------------
 
-    def showEvent(self, event):  # type: ignore[override]
+    def showEvent(self, event: QShowEvent) -> None:  # type: ignore[override]
+        """Sync widget values with stored settings each time the dialog is opened."""
         self._revert()
         super().showEvent(event)

@@ -19,7 +19,7 @@ class ScpWorker(QThread):
     Emits ``finished(ok, message)`` when the transfer completes.
     """
 
-    finished = Signal(bool, str)
+    transfer_done = Signal(bool, str)
 
     def __init__(self, func: object, args: tuple) -> None:
         super().__init__()
@@ -27,14 +27,15 @@ class ScpWorker(QThread):
         self._args = args
 
     def run(self) -> None:
+        """Execute the wrapped callable and emit the transfer-done signal."""
         ok, msg = self._func(*self._args)
-        self.finished.emit(ok, msg)
+        self.transfer_done.emit(ok, msg)
 
 
 def _run_scp(args: list[str], description: str) -> tuple[bool, str]:
     """Run an scp command and return (success, message)."""
     cmd = ["scp", *args]
-    logger.info(f"Running: {' '.join(cmd)}")
+    logger.info("Running: %s", " ".join(cmd))
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
         if result.returncode == 0:
@@ -49,7 +50,7 @@ def _run_scp(args: list[str], description: str) -> tuple[bool, str]:
 def download_manual_align_package(
     server: ServerConfig,
     local_dir: Path,
-    level: int = 1,
+    _level: int = 1,
 ) -> tuple[bool, str]:
     """Download the manual_align data package from the server.
 

@@ -7,6 +7,8 @@ from linumpy_manual_align.ui.widget_typing import ManualAlignWidget
 
 
 class ProjectionEventMixin:
+    """Mixin that handles spinbox, pair combo, projection mode, and Z-offset change events."""
+
     def _on_pair_changed(self: ManualAlignWidget, idx: int) -> None:
         if idx >= 0 and idx != self.current_pair_idx:
             self._load_pair_preserve_camera(idx)
@@ -67,7 +69,10 @@ class ProjectionEventMixin:
         if self._suppress_z_offset_event or not self.pairs:
             return
         mid = self.pairs[self.current_pair_idx][1]
-        self._current_offsets[mid] = (self.spin_fixed_z.value(), self.spin_moving_z.value())
+        self._current_offsets[mid] = (
+            self.spin_fixed_z.value(),
+            self.spin_moving_z.value(),
+        )
         self.unsaved_changes.add(mid)
         self._update_z_relative_label()
 

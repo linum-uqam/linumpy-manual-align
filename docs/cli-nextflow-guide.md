@@ -203,8 +203,11 @@ is needed.
 When you provide a local `nextflow.config` the tool derives the subject ID from
 the config parent folder (e.g. `sub-22`) and constructs remote paths:
 
-- remote workspace: `/scratch/workspace/<subject_id>/`
-- remote output:    `/scratch/workspace/<subject_id>/output/`
+- remote workspace: `<base>/workspace/<subject_id>/`
+- remote output:    `<base>/workspace/<subject_id>/output/`
+
+The default base is `/scratch`.  To use a different scratch filesystem (e.g.
+`/scratch_nvme`) open **Settings** and change the **Remote workspace base** field.
 
 ### Download source
 
@@ -236,7 +239,14 @@ One `slice_z##/` folder per corrected pair, each containing `transform.tfm`,
    c. Press **S** to save.
 4. Click **Save All & Exit**.
 5. Upload transforms to the server.
-6. Re-run the pipeline from `stack` with `-resume`.
+6. In your local `nextflow.config`, add or update:
+   ```
+   params.manual_transforms_dir = '/scratch/workspace/<subject_id>/output/manual_transforms'
+   ```
+   (Replace `<subject_id>` with the actual folder name shown in the Server panel,
+   e.g. `sub-22`.  The uploaded path is always
+   `{remote_output}/manual_transforms/`.)
+7. Re-run the pipeline from `stack` with `-resume`.
 
 ---
 

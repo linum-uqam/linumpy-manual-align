@@ -296,3 +296,88 @@ class TestGetMetric:
         val = get_metric(metrics, "rotation")
         assert val == pytest.approx(3.0)
         assert isinstance(val, float)
+
+
+# ---------------------------------------------------------------------------
+# Transform convention, level scaling, golden values (TEST-04)
+# ---------------------------------------------------------------------------
+
+WORKING_TX = 3.0
+WORKING_TY = -4.0
+WORKING_ROT = 2.5
+WORKING_CENTER = (80.0, 60.0)
+
+
+@pytest.mark.parametrize("level", [0, 1, 2])
+def test_transform_convention_and_level_scaling(tmp_path: Path, level: int) -> None:
+    """Widget content-shift vs SimpleITK on-disk convention at pyramid levels 0–2."""
+    out_dir = tmp_path / f"slice_z{level:02d}"
+    save_transform(
+        out_dir,
+        tx=WORKING_TX,
+        ty=WORKING_TY,
+        rotation_deg=WORKING_ROT,
+        center=WORKING_CENTER,
+        level=level,
+    )
+
+    scale = 2**level
+    tx, ty, rot, center = load_transform(out_dir / "transform.tfm")
+    assert tx == pytest.approx(WORKING_TX * scale, abs=1e-4)
+    assert ty == pytest.approx(WORKING_TY * scale, abs=1e-4)
+    assert rot == pytest.approx(WORKING_ROT, abs=1e-4)
+    assert center[0] == pytest.approx(WORKING_CENTER[0] * scale, abs=1e-4)
+    assert center[1] == pytest.approx(WORKING_CENTER[1] * scale, abs=1e-4)
+
+    metrics = json.loads((out_dir / "pairwise_registration_metrics.json").read_text())
+    manual = metrics["manual_alignment"]
+    disk = metrics["metrics"]
+    neg_full_tx = -WORKING_TX * scale
+    neg_full_ty = -WORKING_TY * scale
+
+    assert manual["working_tx"] == pytest.approx(WORKING_TX, abs=1e-4)
+    assert manual["working_ty"] == pytest.approx(WORKING_TY, abs=1e-4)
+    assert manual["pyramid_level"] == level
+    assert manual["center_working"] == [pytest.approx(WORKING_CENTER[0]), pytest.approx(WORKING_CENTER[1])]
+    assert disk["translation_x"]["value"] == pytest.approx(neg_full_tx, abs=1e-4)
+    assert disk["translation_y"]["value"] == pytest.approx(neg_full_ty, abs=1e-4)
+    assert disk["translation_magnitude"]["value"] == pytest.approx(
+        float(np.hypot(neg_full_tx, neg_full_ty)), abs=1e-4
+    )
+
+
+def test_nonzero_rotation_and_center_roundtrip_at_level_zero(tmp_path: Path) -> None:
+    """Rotation is scale-invariant; working center round-trips through load_transform at level=0."""
+    out_dir = tmp_path / "slice_z10"
+    center = (120.0, 90.0)
+    save_transform(out_dir, tx=5.0, ty=-2.0, rotation_deg=1.75, center=center, level=0)
+
+    tx, ty, rot, loaded_center = load_transform(out_dir / "transform.tfm")
+    assert rot == pytest.approx(1.75, abs=1e-4)
+    assert tx == pytest.approx(5.0, abs=1e-4)
+    assert ty == pytest.approx(-2.0, abs=1e-4)
+    assert loaded_center[0] == pytest.approx(center[0], abs=1e-4)
+    assert loaded_center[1] == pytest.approx(center[1], abs=1e-4)
+
+
+def test_golden_manual_output_values(fixtures_root: Path) -> None:
+    """Committed golden manual_transforms values match load_transform full-res semantics."""
+    golden = fixtures_root / "manual_transforms"
+
+    z01 = golden / "slice_z01"
+    tx, ty, rot, center = load_transform(z01 / "transform.tfm")
+    assert tx == pytest.approx(16.0, abs=1e-4)
+    assert ty == pytest.approx(-10.0, abs=1e-4)
+    assert rot == pytest.approx(1.5, abs=1e-4)
+    assert center[0] == pytest.approx(240.0, abs=1e-4)
+    assert center[1] == pytest.approx(180.0, abs=1e-4)
+    assert load_offsets(z01 / "offsets.txt") == (3, 7)
+
+    z02 = golden / "slice_z02"
+    tx, ty, rot, center = load_transform(z02 / "transform.tfm")
+    assert tx == pytest.approx(-4.0, abs=1e-4)
+    assert ty == pytest.approx(6.0, abs=1e-4)
+    assert rot == pytest.approx(-2.0, abs=1e-4)
+    assert center[0] == pytest.approx(64.0, abs=1e-4)
+    assert center[1] == pytest.approx(64.0, abs=1e-4)
+    assert load_offsets(z02 / "offsets.txt") == (2, 9)

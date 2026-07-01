@@ -75,7 +75,6 @@ def build_scroll_content() -> tuple[QScrollArea, QVBoxLayout]:
 
 
 def build_navigation_row(
-    pairs: list[tuple[int, int]],
     pair_labels: list[str],
     on_prev: Callable,
     on_next: Callable,

@@ -56,4 +56,5 @@ class UndoStack:
 
     @property
     def current(self) -> AlignmentState:
+        """Return the state at the current undo index."""
         return self._history[self._index]

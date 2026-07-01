@@ -9,3 +9,29 @@ build/
 .env.local
 *.local.toml
 linumpy_manual_align_local.*
+
+# === OpenGSD (gsd-core) — keep ALL GSD-produced files out of git ===
+# Runtime installs (Cursor / Claude / Windsurf)
+.cursor/
+.claude/
+.windsurf/
+.windsurf/gsd-local-patches/
+.windsurf/gsd-pristine/
+# Planning workspace (PROJECT.md, ROADMAP.md, STATE.md, phases/, research/, graphs/, milestones/, codebase/, ui-reviews/, config.json, audits)
+.planning/
+# Agent scratch inside planning (doc-verifier JSON, ingest manifests)
+.planning/tmp/
+# Generated agent instruction / rules files (repo root)
+/AGENTS.md
+/CLAUDE.md
+/GEMINI.md
+# Graphify working copy (canonical graph lives under .planning/graphs/)
+graphify-out/
+# GSD handoffs, repo memories, context intel, specs
+handoffs/
+memories/
+context/
+specs/
+# GSD meta / surface state
+.gsd/
+.gsd-profile

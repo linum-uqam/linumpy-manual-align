@@ -21,6 +21,8 @@ from linumpy_manual_align.ui.widget_typing import ManualAlignWidget
 
 
 class InteractionMixin:
+    """Mixin that sets up napari keybindings and Qt event handlers for the widget."""
+
     def _install_keybindings(self: ManualAlignWidget) -> None:
         for key, method_name, args in keybindings_from_settings():
             method = getattr(self, method_name)

@@ -11,6 +11,8 @@ from linumpy_manual_align.ui.widget_typing import ManualAlignWidget
 
 
 class SettingsUiMixin:
+    """Mixin that applies live settings changes to dock UI elements."""
+
     def _refresh_shortcut_hints(self: ManualAlignWidget) -> None:
         """Update the dock footer hint text from current :data:`settings` values."""
         self.hints_label.setText(shortcut_hints_footer_html())

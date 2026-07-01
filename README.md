@@ -187,6 +187,8 @@ The package uses subpackages under `linumpy_manual_align/`. The napari dock UI i
 
 ## Development
 
+Always use `uv` to run commands to ensure they execute in the correct environment. The package supports Python 3.14+.
+
 ```bash
 # Clone and install in editable mode (uv manages the venv)
 git clone https://github.com/linum-uqam/linumpy-manual-align.git

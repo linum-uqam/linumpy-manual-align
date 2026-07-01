@@ -7,6 +7,8 @@ from linumpy_manual_align.ui.widget_typing import ManualAlignWidget
 
 
 class StatusMixin:
+    """Mixin that updates the dock status label from current alignment state."""
+
     def _update_status(self: ManualAlignWidget) -> None:
         if not self.pairs:
             self.status_label.setText(

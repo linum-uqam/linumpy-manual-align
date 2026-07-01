@@ -357,6 +357,34 @@ def load_aip_from_npz(npz_path: Path) -> tuple[np.ndarray, list[float]]:
     return aip, [float(v) for v in scale_yx]
 
 
+def load_center_pos_from_npz(npz_path: Path) -> int | None:
+    """Load the cross-section centre index stored in an AIP ``.npz`` file.
+
+    The exporter (``linum_export_manual_align.py``) records ``center_pos`` in
+    the XZ/YZ cross-section NPZ files: the Y index (XZ) or X index (YZ) at
+    which the static cross-section was extracted, used to initialise the
+    interactive slider at the tissue centroid. Returns *None* when the field
+    is absent (e.g. XY AIPs, or older packages) or the file cannot be read.
+
+    Parameters
+    ----------
+    npz_path : Path
+        Path to an ``.npz`` file written by the exporter.
+
+    Returns
+    -------
+    int or None
+        The stored ``center_pos`` index, or *None* if unavailable.
+    """
+    try:
+        data = np.load(str(npz_path))
+    except OSError, ValueError:
+        return None
+    if "center_pos" in data:
+        return int(data["center_pos"])
+    return None
+
+
 def get_metric(metrics: dict, key: str) -> float | None:
     """Extract a scalar value from a pairwise-registration metrics dict.
 
@@ -374,5 +402,5 @@ def get_metric(metrics: dict, key: str) -> float | None:
     """
     try:
         return float(metrics["metrics"][key]["value"])
-    except (KeyError, TypeError, ValueError):
+    except KeyError, TypeError, ValueError:
         return None

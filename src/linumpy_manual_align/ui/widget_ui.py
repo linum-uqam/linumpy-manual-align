@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+from collections.abc import Generator
 
 from linumpy_manual_align.ui.widget_typing import ManualAlignWidget
 
@@ -16,7 +17,7 @@ class UiHelpersMixin:
         return self.aips_dir is not None
 
     @contextlib.contextmanager
-    def _suppress_events(self: ManualAlignWidget):  # type: ignore[return]
+    def _suppress_events(self: ManualAlignWidget) -> Generator[None]:  # type: ignore[return]
         """Context manager that suppresses spinbox-changed signals.
 
         Guarantees the flag is restored even if an exception is raised inside
@@ -29,7 +30,7 @@ class UiHelpersMixin:
             self._suppress_spinbox_event = False
 
     @contextlib.contextmanager
-    def _suppress_z_events(self: ManualAlignWidget):  # type: ignore[return]
+    def _suppress_z_events(self: ManualAlignWidget) -> Generator[None]:  # type: ignore[return]
         """Context manager that suppresses Z-offset spinbox-changed signals."""
         self._suppress_z_offset_event = True
         try:

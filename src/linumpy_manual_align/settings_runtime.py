@@ -99,14 +99,17 @@ def xy_page_keyboard_hint_html() -> str:
 
 
 def spin_step_tx_ty() -> float:
+    """Return the single-step increment for TX/TY spinboxes from settings."""
     return float(settings.get("spin/tx_ty_step"))
 
 
 def spin_step_rot() -> float:
+    """Return the single-step increment for the rotation spinbox from settings."""
     return float(settings.get("spin/rot_step"))
 
 
 def spin_step_tile() -> int:
+    """Return the single-step increment for the checkerboard tile spinbox from settings."""
     return int(settings.get("spin/tile_step"))
 
 
@@ -116,7 +119,7 @@ def cross_section_nudge_px() -> int:
 
 
 def default_host_display() -> str:
-    """Initial text for the dock Host field."""
+    """Return the initial text for the dock Host field."""
     return str(settings.get("server/default_host"))
 
 

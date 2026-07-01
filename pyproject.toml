@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "CLI application (napari viewer) for manual slice alignment correction in linumpy serial histology pipelines"
 readme = "README.md"
 license = "MIT"
-requires-python = ">=3.12"
+requires-python = ">=3.14"
 authors = [
     { name = "LINUM Lab" },
 ]
@@ -19,7 +19,7 @@ classifiers = [
     "Intended Audience :: Science/Research",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Scientific/Engineering :: Image Processing",
 ]
 dependencies = [
@@ -31,7 +31,7 @@ dependencies = [
 
 [project.optional-dependencies]
 zarr = ["ome-zarr>=0.9"]
-dev = ["pytest", "ruff", "ty"]
+dev = ["pytest", "ruff>=0.11", "ty>=0.0.1a1"]
 
 [project.scripts]
 linumpy-manual-align = "linumpy_manual_align.__main__:main"
@@ -51,11 +51,30 @@ environments = [
 
 # --- ruff ---
 [tool.ruff]
-target-version = "py312"
+target-version = "py314"
 line-length = 127
+fix = true
 
 [tool.ruff.lint]
-select = ["E", "F", "W", "I", "UP", "B", "RUF", "SIM", "C4", "PIE", "PTH"]
+select = ["E", "F", "W", "I", "UP", "B", "RUF", "SIM", "C4", "PIE", "PTH", "N", "PERF", "FLY", "G", "D", "ANN", "ARG", "ERA", "FURB"]
+# N813:   SimpleITK as sitk is the universal Python convention.
+# ANN401: Any is legitimately unavoidable in several callback/override signatures.
+# ANN204: __init__ return type is always None by convention; annotating it adds noise.
+ignore = ["N813", "ANN401", "ANN204"]
+extend-select = ["D417"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "numpy"
+
+[tool.ruff.lint.per-file-ignores]
+# Test files: annotations, docstrings, unused-argument checks, naming, and commented-out
+# code are not required in the test suite.
+"tests/**" = ["ANN", "D", "ARG", "N", "ERA"]
+# cs_server.py is a standalone server-side script uploaded via SSH; it is not checked
+# by ty and does not need annotation/docstring coverage.
+"src/linumpy_manual_align/remote/cs_server.py" = ["ANN", "D"]
+# Qt override methods and Protocol stubs must use Qt's camelCase naming convention.
+"src/linumpy_manual_align/ui/**" = ["N802"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["linumpy_manual_align"]
@@ -81,7 +100,7 @@ filterwarnings = [
 exclude = ["src/linumpy_manual_align/remote/cs_server.py"]
 
 [tool.ty.environment]
-python-version = "3.12"
+python-version = "3.14"
 extra-paths = ["src"]
 
 [tool.ty.rules]
@@ -90,3 +109,14 @@ possibly-unresolved-reference = "error"
 [tool.ty.analysis]
 # Prefer real typings for numpy/scipy/SimpleITK in app code; keep Any only for UI/napari boundaries.
 replace-imports-with-any = ["napari.**", "qtpy.**", "ome_zarr.**"]
+
+# Tests import project internals with pytest fixtures; silence false-positive unresolved refs.
+[[tool.ty.overrides]]
+include = ["tests/**", "**/test_*.py", "**/conftest.py"]
+[tool.ty.overrides.rules]
+possibly-unresolved-reference = "ignore"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+]

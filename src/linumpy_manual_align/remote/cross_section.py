@@ -16,7 +16,6 @@ and ``cross_section_failed`` without needing to own the worker threads.
 from __future__ import annotations
 
 import contextlib
-import json
 import logging
 import os
 from pathlib import Path
@@ -24,6 +23,8 @@ from pathlib import Path
 import numpy as np
 from qtpy.QtCore import QObject, Qt, Signal
 
+from linumpy_manual_align.contracts import load_manual_align_metadata
+from linumpy_manual_align.contracts.models import SEVERITY_WARNING
 from linumpy_manual_align.remote import (
     CrossSectionWorker,
     RemoteSliceReader,
@@ -88,27 +89,23 @@ class CrossSectionManager(QObject):
         Tries *pkg_root* first, then *pkg_root.parent* to handle both flat
         and nested package layouts.
         """
-        for candidate in (
-            pkg_root / "manual_align_metadata.json",
-            pkg_root.parent / "manual_align_metadata.json",
-        ):
-            if candidate.exists():
-                try:
-                    meta = json.loads(candidate.read_text())
-                    self.slices_remote_dir = meta.get("slices_remote_dir")
-                    self.cs_level = int(meta.get("cross_section_level", meta.get("pyramid_level", 0)))
-                    self.slice_filenames = {int(k): v for k, v in meta.get("slice_filenames", {}).items()}
-                    self.slice_remote_paths = {int(k): v for k, v in meta.get("slice_remote_paths", {}).items()}
-                    self.interpolated_slice_ids = {int(i) for i in meta.get("interpolated_slice_ids", [])}
-                    if self.slices_remote_dir:
-                        logger.info(
-                            "Interactive XZ/YZ enabled: remote zarr at %s level %d",
-                            self.slices_remote_dir,
-                            self.cs_level,
-                        )
-                except Exception as exc:
-                    logger.warning("Could not read package metadata: %s", exc)
-                break
+        normalized, issues = load_manual_align_metadata(pkg_root)
+        for issue in issues:
+            if issue.severity == SEVERITY_WARNING:
+                logger.warning("%s: %s", issue.code, issue.message)
+        if normalized.source_path is None:
+            return
+        self.slices_remote_dir = normalized.slices_remote_dir
+        self.cs_level = normalized.pyramid_level
+        self.slice_filenames = dict(normalized.slice_filenames)
+        self.slice_remote_paths = dict(normalized.slice_remote_paths)
+        self.interpolated_slice_ids = set(normalized.interpolated_slice_ids)
+        if self.slices_remote_dir:
+            logger.info(
+                "Interactive XZ/YZ enabled: remote zarr at %s level %d",
+                self.slices_remote_dir,
+                self.cs_level,
+            )
 
     # ------------------------------------------------------------------
     # Reader lifecycle

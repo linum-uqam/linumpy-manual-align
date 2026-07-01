@@ -8,12 +8,15 @@ from pathlib import Path
 import numpy as np
 
 from linumpy_manual_align.io.image_utils import enhance_aip, normalize_aip
+from linumpy_manual_align.io.transform_io import load_center_pos_from_npz
 from linumpy_manual_align.ui.widget_typing import ManualAlignWidget
 
 logger = logging.getLogger(__name__)
 
 
 class CrossSectionMixin:
+    """Mixin that manages interactive XZ/YZ cross-section views from a remote OME-Zarr."""
+
     def _update_initial_cs_position(self: ManualAlignWidget, fid: int, mid: int) -> None:
         """Resolve the cross-section slider position for this pair.
 
@@ -44,16 +47,12 @@ class CrossSectionMixin:
         # data (where the static cross-section was extracted) and must be loaded
         # regardless of which priority path resolves the moving slider position.
         if npz_path is not None:
-            try:
-                data = np.load(str(npz_path))
-                if "center_pos" in data:
-                    cp = int(data["center_pos"])
-                    if axis == "xz":
-                        self._fixed_cs_pos = (cp, self._fixed_cs_pos[1])
-                    else:
-                        self._fixed_cs_pos = (self._fixed_cs_pos[0], cp)
-            except Exception:
-                pass
+            cp = load_center_pos_from_npz(npz_path)
+            if cp is not None:
+                if axis == "xz":
+                    self._fixed_cs_pos = (cp, self._fixed_cs_pos[1])
+                else:
+                    self._fixed_cs_pos = (self._fixed_cs_pos[0], cp)
 
         self._cross_section_y = 0
         self._cross_section_x = 0
@@ -72,7 +71,10 @@ class CrossSectionMixin:
                     if vals.size >= 2:
                         self._cross_section_y = int(vals[0])
                         self._cross_section_x = int(vals[1])
-                        self._cs_positions[mid] = (self._cross_section_y, self._cross_section_x)
+                        self._cs_positions[mid] = (
+                            self._cross_section_y,
+                            self._cross_section_x,
+                        )
                         return
                 except Exception:
                     pass
@@ -81,18 +83,14 @@ class CrossSectionMixin:
         if npz_path is None:
             return
 
-        try:
-            data = np.load(str(npz_path))
-            if "center_pos" not in data:
-                return
-            cp = int(data["center_pos"])
-            slider_val = cp + self._cs_moving_offset(axis)
-            if axis == "xz":
-                self._cross_section_y = slider_val
-            else:
-                self._cross_section_x = slider_val
-        except Exception:
-            pass
+        cp = load_center_pos_from_npz(npz_path)
+        if cp is None:
+            return
+        slider_val = cp + self._cs_moving_offset(axis)
+        if axis == "xz":
+            self._cross_section_y = slider_val
+        else:
+            self._cross_section_x = slider_val
 
     def _ensure_readers_for_pair(self: ManualAlignWidget) -> None:
         """Start a SliceReaderWorker for the moving slice of the current pair.
@@ -176,8 +174,8 @@ class CrossSectionMixin:
 
         self._cs_mgr.request(mid, axis, init)
 
-    def _on_reader_ready(self: ManualAlignWidget, sid: int, reader: object) -> None:
-        """Called when ``CrossSectionManager`` finishes opening a reader."""
+    def _on_reader_ready(self: ManualAlignWidget, sid: int, _reader: object) -> None:
+        """Handle the reader-ready signal and initialise the cross-section slider."""
         if not self.pairs:
             return
         _fid, mid = self.pairs[self.current_pair_idx]
@@ -185,8 +183,8 @@ class CrossSectionMixin:
             return
         self._init_cs_slider_from_reader(mid)
 
-    def _on_reader_failed(self: ManualAlignWidget, sid: int, msg: str) -> None:
-        """Called when a remote reader fails to open."""
+    def _on_reader_failed(self: ManualAlignWidget, sid: int, _msg: str) -> None:
+        """Handle the reader-failed signal and display an error in the loading label."""
         self._cs_loading_label.setText(f"<span style='color:red;'>Reader failed for z{sid:02d}</span>")
 
     def _on_cross_section_ready(self: ManualAlignWidget, sid: int, axis: str, pos: int, img: object) -> None:
@@ -217,7 +215,7 @@ class CrossSectionMixin:
             self.moving_layer.data = enhance_aip(normalize_aip(np.asarray(img, dtype=np.float32)), self._enhance_mode)
 
     def _on_cross_section_failed(self: ManualAlignWidget, sid: int, axis: str, pos: int, msg: str) -> None:
-        logger.warning(f"Cross-section fetch failed z{sid:02d} {axis}[{pos}]: {msg}")
+        logger.warning("Cross-section fetch failed z%02d %s[%d]: %s", sid, axis, pos, msg)
 
     def _cs_moving_offset(self: ManualAlignWidget, axis: str) -> int:
         """Pixel offset to add to the fixed slider position to show matching tissue in the moving slice.
@@ -237,7 +235,7 @@ class CrossSectionMixin:
         return -round(state.tx * scale)
 
     def _on_cs_slider_settled(self: ManualAlignWidget) -> None:
-        """Called after the debounce timer fires — fetch moving slice at the new position."""
+        """Fetch moving slice at the new position after the debounce timer fires."""
         if not self.pairs or self._projection_mode == "xy":
             return
         _fid, mid = self.pairs[self.current_pair_idx]

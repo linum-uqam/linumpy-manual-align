@@ -1,0 +1,9 @@
+{
+  "pyramid_level": 1,
+  "slices_remote_dir": "/remote/slices",
+  "slice_filenames": {
+    "0": "slice_z00.ome.zarr",
+    "1": "slice_z01.ome.zarr",
+    "2": "slice_z02.ome.zarr"
+  }
+}

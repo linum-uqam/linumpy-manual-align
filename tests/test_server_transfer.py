@@ -62,6 +62,28 @@ class TestParseServerConfig:
         # subject_id is the parent dir name regardless
         assert cfg.subject_id == tmp_path.name
 
+    def test_custom_remote_base(self, tmp_path: Path) -> None:
+        """remote_base overrides the default /scratch prefix in remote_output."""
+        sub_dir = tmp_path / "sub-22"
+        sub_dir.mkdir()
+        config_path = sub_dir / "nextflow.config"
+        config_path.write_text("")
+
+        cfg = parse_server_config(config_path, remote_base="/scratch_nvme")
+        assert cfg is not None
+        assert cfg.remote_output == "/scratch_nvme/workspace/sub-22/output"
+
+    def test_default_remote_base_is_scratch(self, tmp_path: Path) -> None:
+        """Default remote_base is /scratch (backward-compatible)."""
+        sub_dir = tmp_path / "sub-10"
+        sub_dir.mkdir()
+        config_path = sub_dir / "nextflow.config"
+        config_path.write_text("")
+
+        cfg = parse_server_config(config_path)
+        assert cfg is not None
+        assert cfg.remote_output.startswith("/scratch/")
+
 
 class TestServerConfig:
     def test_dataclass(self) -> None:

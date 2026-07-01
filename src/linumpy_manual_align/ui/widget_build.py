@@ -19,6 +19,7 @@ from linumpy_manual_align.ui.widget_typing import ManualAlignWidget
 
 
 def build_manual_align_ui(widget: ManualAlignWidget) -> None:
+    """Build and attach all Qt widgets and signal wiring to *widget*."""
     # ── Outer scroll area ────────────────────────────────────────────────
     outer = QVBoxLayout()
     outer.setContentsMargins(0, 0, 0, 0)
@@ -28,7 +29,6 @@ def build_manual_align_ui(widget: ManualAlignWidget) -> None:
 
     # ── Pair navigation ───────────────────────────────────────────────────
     nav_layout, nav = build_navigation_row(
-        pairs=widget.pairs,
         pair_labels=[widget._pair_label(fid, mid) for fid, mid in widget.pairs],
         on_prev=widget._prev_pair,
         on_next=widget._next_pair,
@@ -173,7 +173,10 @@ def build_manual_align_ui(widget: ManualAlignWidget) -> None:
         widget._cross_section_y = v
         if widget.pairs:
             _fid, _mid = widget.pairs[widget.current_pair_idx]
-            widget._cs_positions[_mid] = (widget._cross_section_y, widget._cross_section_x)
+            widget._cs_positions[_mid] = (
+                widget._cross_section_y,
+                widget._cross_section_x,
+            )
         widget._cs_debounce_timer.start(150)
 
     def _on_x_changed(v: int) -> None:
@@ -181,7 +184,10 @@ def build_manual_align_ui(widget: ManualAlignWidget) -> None:
         widget._cross_section_x = v
         if widget.pairs:
             _fid, _mid = widget.pairs[widget.current_pair_idx]
-            widget._cs_positions[_mid] = (widget._cross_section_y, widget._cross_section_x)
+            widget._cs_positions[_mid] = (
+                widget._cross_section_y,
+                widget._cross_section_x,
+            )
         widget._cs_debounce_timer.start(150)
 
     widget.slider_cs_y.valueChanged.connect(_on_y_changed)

@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
-from qtpy.QtWidgets import QMessageBox
+import contextlib
+
+from qtpy.QtWidgets import QApplication, QMessageBox
 
 from linumpy_manual_align.ui.widget_typing import ManualAlignWidget
 
 
 class CloseGuardMixin:
+    """Mixin that intercepts main-window close events to warn about unsaved changes."""
+
     def _install_close_guard(self: ManualAlignWidget) -> None:
         """Install event filter to warn about unsaved changes on window close."""
         try:
@@ -15,6 +19,37 @@ class CloseGuardMixin:
             main_window.installEventFilter(self)
         except AttributeError:
             pass  # napari API changed; skip gracefully
+
+    def _install_quit_cleanup(self: ManualAlignWidget) -> None:
+        """Stop background QThreads cleanly when the application is about to quit.
+
+        Napari does not always deliver ``closeEvent`` to dock widgets when the
+        main window closes, so any in-flight ``QThread`` (SCP transfers,
+        remote slice readers, cross-section fetches) can be garbage-collected
+        while still running, producing
+        ``QThread: Destroyed while thread '' is still running`` warnings (and
+        sometimes a crash). Hooking ``QApplication.aboutToQuit`` guarantees
+        graceful shutdown regardless of which window owns the close event.
+        """
+        app = QApplication.instance()
+        if app is None:
+            return
+        app.aboutToQuit.connect(self._shutdown_workers)
+
+    def _shutdown_workers(self: ManualAlignWidget) -> None:
+        """Quit and join every background QThread owned by this widget."""
+        # Cross-section / remote-reader workers
+        cs_mgr = getattr(self, "_cs_mgr", None)
+        if cs_mgr is not None:
+            with contextlib.suppress(Exception):
+                cs_mgr.close_all()
+        # SCP download/upload worker
+        worker = getattr(self, "_worker", None)
+        if worker is not None:
+            with contextlib.suppress(Exception):
+                worker.quit()
+                worker.wait(2000)
+            self._worker = None
 
     def eventFilter(self: ManualAlignWidget, obj: object, event: object) -> bool:
         """Intercept close events to warn about unsaved changes."""

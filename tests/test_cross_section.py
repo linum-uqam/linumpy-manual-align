@@ -75,6 +75,23 @@ class TestLoadMetadata:
         assert mgr.cs_level == 3
 
 
+class TestLoadMetadataDelegation:
+    """Contract delegation preserves field-level tolerance (Plan 01-03)."""
+
+    def test_malformed_level_preserves_other_fields(self, tmp_path: Path, qapp) -> None:
+        meta = {
+            "slices_remote_dir": "/remote/slices",
+            "cross_section_level": "not-a-number",
+            "slice_filenames": {"1": "slice_z01.ome.zarr"},
+        }
+        (tmp_path / "manual_align_metadata.json").write_text(json.dumps(meta))
+        mgr = CrossSectionManager()
+        mgr.load_metadata(tmp_path)
+        assert mgr.slices_remote_dir == "/remote/slices"
+        assert mgr.cs_level == 0
+        assert mgr.slice_filenames[1] == "slice_z01.ome.zarr"
+
+
 # ---------------------------------------------------------------------------
 # Cache operations
 # ---------------------------------------------------------------------------

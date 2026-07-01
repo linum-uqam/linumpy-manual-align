@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 from pathlib import Path
 
 import numpy as np
@@ -36,3 +37,22 @@ def fake_data_package(tmp_path: Path) -> Path:
         np.savez(str(aips / f"slice_z{i:02d}.npz"), aip=aip, scale=scale)
 
     return pkg
+
+
+@pytest.fixture(scope="session")
+def fixtures_root() -> Path:
+    """Path to committed test fixtures under tests/fixtures/."""
+    return Path(__file__).parent / "fixtures"
+
+
+@pytest.fixture
+def copy_fixture_tree(tmp_path: Path, fixtures_root: Path):
+    """Return a callable that copies a committed fixture tree into tmp_path."""
+
+    def _copy(name: str, dest: Path | None = None) -> Path:
+        src = fixtures_root / name
+        target = dest or tmp_path / name
+        shutil.copytree(src, target)
+        return target
+
+    return _copy

@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from qtpy.QtCore import QThread, Signal
 
-from linumpy_manual_align.remote.remote_reader import RemoteSliceReader, open_remote_slice_reader
+from linumpy_manual_align.remote.remote_reader import (
+    RemoteSliceReader,
+    open_remote_slice_reader,
+)
 from linumpy_manual_align.remote.server_config import ServerConfig
 
 
@@ -32,8 +35,14 @@ class SliceReaderWorker(QThread):
         self._level = level
 
     def run(self) -> None:
+        """Open a remote slice reader and emit the ready or failed signal."""
         try:
-            reader = open_remote_slice_reader(self._server, self._remote_zarr_path, self._level, reader_id=self._slice_id)
+            reader = open_remote_slice_reader(
+                self._server,
+                self._remote_zarr_path,
+                self._level,
+                reader_id=self._slice_id,
+            )
             reader.slice_id = self._slice_id
             self.ready.emit(self._slice_id, reader)
         except Exception as exc:
@@ -66,6 +75,7 @@ class CrossSectionWorker(QThread):
         self._pos = pos
 
     def run(self) -> None:
+        """Fetch one cross-section frame and emit the result or failed signal."""
         try:
             img, _scale = self._reader.request(self._axis, self._pos)
             self.result.emit(self._reader.slice_id, self._axis, self._pos, img)

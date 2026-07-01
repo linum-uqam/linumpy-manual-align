@@ -30,6 +30,8 @@ logger = logging.getLogger(__name__)
 
 
 class PairLoadingMixin:
+    """Mixin that handles slice-pair discovery, loading, and AIP data management."""
+
     def _refresh_saved_pairs(self: ManualAlignWidget) -> None:
         """Scan output_dir and pre-populate saved_pairs with already-written transforms."""
         if not self.output_dir.exists():
@@ -76,7 +78,13 @@ class PairLoadingMixin:
         if manual_tfm.exists():
             tx, ty, rot, tfm_center = load_transform(manual_tfm)
             if img_center is not None:
-                tx, ty = adjust_for_rotation_center(tx, ty, rot, tfm_center, (img_center[0] * scale, img_center[1] * scale))
+                tx, ty = adjust_for_rotation_center(
+                    tx,
+                    ty,
+                    rot,
+                    tfm_center,
+                    (img_center[0] * scale, img_center[1] * scale),
+                )
             self.saved_pairs.add(mid)
             return AlignmentState(tx=tx / scale, ty=ty / scale, rotation=rot)
 
@@ -116,7 +124,12 @@ class PairLoadingMixin:
                 _moving_npz = per_slice_store[mid]
                 _use_paired = False
             else:
-                logger.warning(f"No {self._projection_mode.upper()} AIPs for pair z{fid:02d}→z{mid:02d}")
+                logger.warning(
+                    "No %s AIPs for pair z%02d→z%02d",
+                    self._projection_mode.upper(),
+                    fid,
+                    mid,
+                )
                 _fixed_npz = _moving_npz = None
                 _use_paired = False
         else:

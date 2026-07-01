@@ -3,9 +3,17 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 from qtpy.QtWidgets import QMessageBox
 
+from linumpy_manual_align.contracts import (
+    SEVERITY_ERROR,
+    SEVERITY_WARNING,
+    ContractIssue,
+    manual_output_dir,
+    validate_manual_output,
+)
 from linumpy_manual_align.io.transform_io import (
     adjust_for_rotation_center,
     load_transform,
@@ -18,6 +26,8 @@ logger = logging.getLogger(__name__)
 
 
 class UndoSaveMixin:
+    """Mixin that implements undo/redo, per-pair save, and batch save-all operations."""
+
     def _undo(self: ManualAlignWidget) -> None:
         if not self.pairs:
             return
@@ -76,22 +86,61 @@ class UndoSaveMixin:
 
     # ----- Save -----
 
+    def _format_save_error(self: ManualAlignWidget, mid: int, errors: list[ContractIssue], out_dir: Path) -> str:
+        primary = errors[0]
+        file = primary.affected_path.name if primary.affected_path is not None else out_dir.name
+        return f"z{mid:02d}: {file} - {primary.code}: {primary.message}"
+
+    def _save_and_validate_pair(
+        self: ManualAlignWidget, mid: int, state: AlignmentState
+    ) -> list[ContractIssue]:
+        cx, cy = self.pair_centers.get(mid, (0.0, 0.0))
+        offsets = self._current_offsets.get(mid, (0, 0))
+
+        out_dir = manual_output_dir(self.output_dir, mid)
+        save_transform(
+            out_dir,
+            state.tx,
+            state.ty,
+            state.rotation,
+            center=(cx, cy),
+            level=self.level,
+            offsets=offsets,
+        )
+
+        issues = validate_manual_output(out_dir, mid)
+        errors = [i for i in issues if i.severity == SEVERITY_ERROR]
+        warnings = [i for i in issues if i.severity == SEVERITY_WARNING]
+
+        if errors:
+            logger.warning("Save validation failed for z%02d: %s", mid, issues)
+            self.saved_pairs.discard(mid)
+            message = self._format_save_error(mid, errors, out_dir)
+            self.viewer.status = message
+            self.status_label.setText(message)
+            QMessageBox.critical(self, "Save validation failed", message)
+            return errors
+
+        self.saved_pairs.add(mid)
+        self.unsaved_changes.discard(mid)
+        base = f"Saved transform for z{mid:02d} -> {out_dir}"
+        if warnings:
+            warning_text = "; ".join(f"{w.code}: {w.message}" for w in warnings)
+            status = f"{base} (warning {warning_text})"
+        else:
+            status = base
+        self.viewer.status = status
+        self.status_label.setText(status)
+        self._flash_saved(mid)
+        return []
+
     def _save_current(self: ManualAlignWidget) -> None:
         """Save the current transform for the current pair."""
         if not self.pairs:
             return
         _fid, mid = self.pairs[self.current_pair_idx]
         state = self._current_state()
-
-        cx, cy = self.pair_centers.get(mid, (0.0, 0.0))
-        offsets = self._current_offsets.get(mid, (0, 0))
-
-        out_dir = self.output_dir / f"slice_z{mid:02d}"
-        save_transform(out_dir, state.tx, state.ty, state.rotation, center=(cx, cy), level=self.level, offsets=offsets)
-        self.saved_pairs.add(mid)
-        self.unsaved_changes.discard(mid)
-        self.viewer.status = f"Saved transform for z{mid:02d} → {out_dir}"
-        self._flash_saved(mid)
+        self._save_and_validate_pair(mid, state)
 
     def _save_all_and_exit(self: ManualAlignWidget, skip_confirm: bool = False) -> None:
         """Save all modified pairs and close."""
@@ -114,7 +163,7 @@ class UndoSaveMixin:
             if msg.exec() != QMessageBox.Ok:
                 return
 
-        count = 0
+        saved = 0
         for _fid, mid in self.pairs:
             if mid not in self.unsaved_changes:
                 continue
@@ -122,17 +171,22 @@ class UndoSaveMixin:
             if stack is None:
                 continue
             state = stack.current
+            errors = self._save_and_validate_pair(mid, state)
+            if errors:
+                detail = self.viewer.status
+                self.viewer.status = f"Saved {saved} pair(s), 1 failed validation - {detail}"
+                self.status_label.setText(self.viewer.status)
+                return
 
-            cx, cy = self.pair_centers.get(mid, (0.0, 0.0))
-            offsets = self._current_offsets.get(mid, (0, 0))
+            saved += 1
 
-            out_dir = self.output_dir / f"slice_z{mid:02d}"
-            save_transform(out_dir, state.tx, state.ty, state.rotation, center=(cx, cy), level=self.level, offsets=offsets)
-            self.saved_pairs.add(mid)
-            count += 1
+        remaining = [m for m in self.unsaved_changes if self.undo_stacks.get(m) is not None]
+        if remaining:
+            self.viewer.status = f"Cannot exit: {len(remaining)} pair(s) still have unsaved changes."
+            self.status_label.setText(self.viewer.status)
+            return
 
-        self.unsaved_changes.clear()
         self._close_confirmed = True
-        self.viewer.status = f"Saved {count} transforms to {self.output_dir}"
-        logger.info(f"Saved {count} manual transforms to {self.output_dir}")
+        self.viewer.status = f"Saved {saved} transforms to {self.output_dir}"
+        logger.info("Saved %d manual transforms to %s", saved, self.output_dir)
         self.viewer.close()

@@ -18,12 +18,18 @@ from linumpy_manual_align.ui.widget_typing import ManualAlignWidget
 
 
 class ServerMixin:
+    """Mixin that handles server download/upload and configuration UI interactions."""
+
     def _download_from_server(self: ManualAlignWidget) -> None:
         """Download the manual alignment data package from the server (in background thread)."""
         from linumpy_manual_align.remote import download_manual_align_package
 
         if self.server_config is None:
             return
+
+        # Recompute remote_output in case the workspace-base setting changed after config load
+        remote_base = str(settings.get("server/remote_workspace_base"))
+        self.server_config.remote_output = f"{remote_base}/workspace/{self.server_config.subject_id}/output"
 
         self.btn_download.setEnabled(False)
         self.btn_upload.setEnabled(False)
@@ -37,7 +43,8 @@ class ServerMixin:
         local_dir = self.output_dir.parent / "server_package"
 
         self._worker = ScpWorker(download_manual_align_package, (self.server_config, local_dir, self.level))
-        self._worker.finished.connect(lambda ok, msg: self._on_download_finished(ok, msg, local_dir))
+        self._worker.transfer_done.connect(lambda ok, msg: self._on_download_finished(ok, msg, local_dir))
+        self._worker.finished.connect(self._worker.deleteLater)
         self._worker.start()
 
     def _on_download_finished(self: ManualAlignWidget, ok: bool, msg: str, local_dir: Path) -> None:
@@ -47,13 +54,25 @@ class ServerMixin:
         self.viewer.status = msg
         self.btn_download.setEnabled(True)
         self.btn_upload.setEnabled(True)
-        self._worker = None
+        self._worker = None  # drop Python ref; Qt cleanup via deleteLater
 
         if ok:
             pkg_aips = local_dir / "manual_align_package" / "aips"
             if not pkg_aips.exists():
                 pkg_aips = local_dir / "aips"
             if pkg_aips.exists():
+                # Update pyramid level from package metadata so save/load scaling is correct.
+                metadata_path = pkg_aips.parent / "manual_align_metadata.json"
+                if metadata_path.exists():
+                    import json
+
+                    try:
+                        meta = json.loads(metadata_path.read_text())
+                        if "pyramid_level" in meta:
+                            self.level = int(meta["pyramid_level"])
+                    except Exception:
+                        pass
+
                 self.aips_dir = pkg_aips
                 self.slice_paths = discover_aips(pkg_aips)
                 self.slice_ids = list(self.slice_paths.keys())
@@ -72,7 +91,8 @@ class ServerMixin:
                 if pkg_tfm.exists():
                     self.transforms_dir = pkg_tfm
                     self.existing_transforms = discover_transforms(pkg_tfm)
-                # Rebuild pairs and reload
+                # Refresh saved pairs from disk then rebuild
+                self._refresh_saved_pairs()
                 self._rebuild_pairs()
 
     def _upload_to_server(self: ManualAlignWidget) -> None:
@@ -81,6 +101,10 @@ class ServerMixin:
 
         if self.server_config is None:
             return
+
+        # Recompute remote_output in case the workspace-base setting changed after config load
+        remote_base = str(settings.get("server/remote_workspace_base"))
+        self.server_config.remote_output = f"{remote_base}/workspace/{self.server_config.subject_id}/output"
 
         if not self.output_dir.exists() or not list(self.output_dir.glob("slice_z*")):
             self.server_status_label.setText("No saved transforms to upload")
@@ -93,10 +117,11 @@ class ServerMixin:
         self.viewer.status = "Uploading transforms to server..."
 
         self._worker = ScpWorker(upload_manual_transforms, (self.server_config, self.output_dir))
-        self._worker.finished.connect(self._on_upload_finished)
+        self._worker.transfer_done.connect(self._on_upload_finished)
+        self._worker.finished.connect(self._worker.deleteLater)
         self._worker.start()
 
-    def _on_upload_finished(self: ManualAlignWidget, ok: bool, msg: str) -> None:
+    def _on_upload_finished(self: ManualAlignWidget, _ok: bool, msg: str) -> None:
         """Handle completion of background upload."""
         self.server_progress.hide()
         self.server_status_label.setText(msg)
@@ -107,6 +132,9 @@ class ServerMixin:
 
     def _rebuild_pairs(self: ManualAlignWidget) -> None:
         """Rebuild pair list after slice discovery changes, then reload UI."""
+        # Remember the moving-slice ID we were on so we can restore it afterward.
+        prev_mid = self.pairs[self.current_pair_idx][1] if self.pairs else None
+
         self._build_pairs()
 
         if not self.pairs:
@@ -120,8 +148,15 @@ class ServerMixin:
             self.pair_combo.addItem(self._pair_label(fid, mid))
         self.pair_combo.blockSignals(False)
 
-        self.current_pair_idx = 0
-        self._load_pair(0)
+        # Restore the previously active pair by moving-slice ID; fall back to 0.
+        target_idx = 0
+        if prev_mid is not None:
+            for i, (_fid, mid) in enumerate(self.pairs):
+                if mid == prev_mid:
+                    target_idx = i
+                    break
+        self.current_pair_idx = target_idx
+        self._load_pair(target_idx)
 
     def _browse_server_config(self: ManualAlignWidget) -> None:
         """Open file dialog to select a nextflow.config for server access."""
@@ -141,7 +176,11 @@ class ServerMixin:
         from linumpy_manual_align.remote import parse_server_config
 
         host = self.host_edit.text().strip() or default_host_display()
-        cfg = parse_server_config(config_path, host=host)
+        cfg = parse_server_config(
+            config_path,
+            host=host,
+            remote_base=str(settings.get("server/remote_workspace_base")),
+        )
         if cfg is None:
             self.server_status_label.setText("<b style='color: red;'>Failed to parse config</b>")
             return
