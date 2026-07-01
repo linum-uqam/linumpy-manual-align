@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from qtpy.QtWidgets import QFileDialog
+from qtpy.QtWidgets import QFileDialog, QMessageBox
 
+from linumpy_manual_align.contracts import UploadReadinessReport, assess_upload_readiness
 from linumpy_manual_align.io.transform_io import discover_aips, discover_pair_aips, discover_transforms
 from linumpy_manual_align.remote import ScpWorker
 from linumpy_manual_align.settings import settings
@@ -95,6 +96,39 @@ class ServerMixin:
                 self._refresh_saved_pairs()
                 self._rebuild_pairs()
 
+    def _format_blocked_upload_body(self: ManualAlignWidget, report: UploadReadinessReport) -> str:
+        """Build the critical-dialog body for a blocked upload readiness report."""
+        lines: list[str] = []
+        if report.ready_count == 0:
+            lines.append("No pairs ready to upload")
+        lines.append(report.summary_line())
+        lines.append("")
+        lines.extend(f"- {error_line}" for error_line in report.error_lines())
+        return "\n".join(lines)
+
+    def _confirm_upload_dialog(
+        self: ManualAlignWidget, report: UploadReadinessReport, remote_dest: str
+    ) -> bool:
+        """Show confirm-upload dialog; return True when the operator accepts."""
+        body_lines = [report.summary_line()]
+        warnings = report.warning_lines()
+        if warnings:
+            body_lines.append("")
+            body_lines.append("Warnings:")
+            body_lines.extend(f"- {warning_line}" for warning_line in warnings)
+        body_lines.append("")
+        body_lines.append(
+            f"Upload {report.ready_count} pair(s) to {remote_dest}?"
+        )
+        msg = QMessageBox(self)
+        msg.setWindowTitle("Confirm upload")
+        msg.setIcon(QMessageBox.Question)
+        msg.setText("\n".join(body_lines))
+        msg.setStandardButtons(QMessageBox.Ok | QMessageBox.Cancel)
+        msg.setDefaultButton(QMessageBox.Ok)
+        msg.button(QMessageBox.Ok).setText("Upload")
+        return msg.exec() == QMessageBox.Ok
+
     def _upload_to_server(self: ManualAlignWidget) -> None:
         """Upload saved manual transforms to the server (in background thread)."""
         from linumpy_manual_align.remote import upload_manual_transforms
@@ -106,8 +140,21 @@ class ServerMixin:
         remote_base = str(settings.get("server/remote_workspace_base"))
         self.server_config.remote_output = f"{remote_base}/workspace/{self.server_config.subject_id}/output"
 
-        if not self.output_dir.exists() or not list(self.output_dir.glob("slice_z*")):
-            self.server_status_label.setText("No saved transforms to upload")
+        report = assess_upload_readiness(self.pairs, self.output_dir, self.saved_pairs)
+        remote_dest = f"{self.server_config.host}:{self.server_config.remote_output}/manual_transforms/"
+
+        if report.has_blocking_errors:
+            self.server_status_label.setText(
+                f"Upload blocked: {report.summary_line()} — fix errors and retry"
+            )
+            body = self._format_blocked_upload_body(report)
+            error_lines = report.error_lines()
+            self.viewer.status = error_lines[0] if error_lines else report.summary_line()
+            QMessageBox.critical(self, "Upload blocked", body)
+            return
+
+        self.server_status_label.setText(report.summary_line())
+        if not self._confirm_upload_dialog(report, remote_dest):
             return
 
         self.btn_download.setEnabled(False)
@@ -116,7 +163,10 @@ class ServerMixin:
         self.server_status_label.setText("<i>Uploading...</i>")
         self.viewer.status = "Uploading transforms to server..."
 
-        self._worker = ScpWorker(upload_manual_transforms, (self.server_config, self.output_dir))
+        self._worker = ScpWorker(
+            upload_manual_transforms,
+            (self.server_config, self.output_dir, list(report.ready_dirs)),
+        )
         self._worker.transfer_done.connect(self._on_upload_finished)
         self._worker.finished.connect(self._worker.deleteLater)
         self._worker.start()

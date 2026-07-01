@@ -8,12 +8,22 @@ from unittest.mock import MagicMock
 import pytest
 
 from linumpy_manual_align.__main__ import parse_args
-from linumpy_manual_align.contracts import SEVERITY_ERROR, SEVERITY_WARNING, ContractIssue, validate_manual_output
+from linumpy_manual_align.contracts import (
+    SEVERITY_ERROR,
+    SEVERITY_WARNING,
+    ContractIssue,
+    PairUploadReadiness,
+    PairUploadStatus,
+    UploadReadinessReport,
+    validate_manual_output,
+)
 from linumpy_manual_align.io.transform_io import save_transform
 from linumpy_manual_align.state import _MAX_UNDO_HISTORY, AlignmentState, UndoStack
 from linumpy_manual_align.ui.widget_close_guard import CloseGuardMixin
+from linumpy_manual_align.ui.widget_server import ServerMixin
 from linumpy_manual_align.ui.widget_undo_save import UndoSaveMixin
 import linumpy_manual_align.ui.widget_close_guard as widget_close_guard_module
+import linumpy_manual_align.ui.widget_server as widget_server_module
 import linumpy_manual_align.ui.widget_undo_save as widget_undo_save_module
 
 
@@ -684,3 +694,585 @@ class TestSaveAllValidation:
         assert 2 in called_mids
         assert 3 in called_mids
         assert len(calls) >= 3
+
+
+class _UploadServerConfig:
+    def __init__(self, host: str, subject_id: str, remote_output: str = "") -> None:
+        self.host = host
+        self.subject_id = subject_id
+        self.remote_output = remote_output
+
+
+class _ButtonStub:
+    def __init__(self) -> None:
+        self.enabled: bool | None = None
+
+    def setEnabled(self, enabled: bool) -> None:
+        self.enabled = enabled
+
+
+class _ProgressStub:
+    def __init__(self) -> None:
+        self.shown = False
+        self.hidden = False
+
+    def show(self) -> None:
+        self.shown = True
+
+    def hide(self) -> None:
+        self.hidden = True
+
+
+class _SignalStub:
+    def connect(self, _callback) -> None:
+        pass
+
+
+class _ScpWorkerRecorder:
+    instances: list[_ScpWorkerRecorder] = []
+
+    def __init__(self, func, args) -> None:
+        self.func = func
+        self.args = args
+        self.transfer_done = _SignalStub()
+        self.finished = _SignalStub()
+        type(self).instances.append(self)
+
+    def start(self) -> None:
+        pass
+
+    def deleteLater(self) -> None:
+        pass
+
+
+def _make_upload_widget(
+    tmp_path: Path,
+    pairs: list[tuple[int, int]],
+    saved_pairs: set[int],
+    *,
+    server_config: _UploadServerConfig | None = _UploadServerConfig(
+        host="myserver.example.com",
+        subject_id="sub-22",
+        remote_output="/scratch/workspace/sub-22/output",
+    ),
+) -> ServerMixin:
+    widget = object.__new__(ServerMixin)
+    widget.server_config = server_config
+    widget.output_dir = tmp_path
+    widget.pairs = pairs
+    widget.saved_pairs = saved_pairs
+    widget.viewer = _Viewer()
+    widget.server_status_label = _StatusLabel()
+    widget.btn_download = _ButtonStub()
+    widget.btn_upload = _ButtonStub()
+    widget.server_progress = _ProgressStub()
+    widget._worker = None
+    return widget
+
+
+def _make_readiness_report(
+    *,
+    ready_count: int = 0,
+    missing_count: int = 0,
+    invalid_count: int = 0,
+    warning_count: int = 0,
+    pairs: tuple[PairUploadReadiness, ...] = (),
+    ready_dirs: tuple[Path, ...] = (),
+) -> UploadReadinessReport:
+    return UploadReadinessReport(
+        pairs=pairs,
+        ready_count=ready_count,
+        missing_count=missing_count,
+        invalid_count=invalid_count,
+        warning_count=warning_count,
+        ready_dirs=ready_dirs,
+    )
+
+
+def _patch_upload_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        widget_server_module.settings,
+        "get",
+        lambda key: "/scratch" if key == "server/remote_workspace_base" else "",
+    )
+
+
+class TestUploadGate:
+    def test_upload_blocked_shows_critical(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        issue1 = ContractIssue(
+            severity=SEVERITY_ERROR,
+            code="output.missing_offsets",
+            message="offsets.txt not found",
+        )
+        issue2 = ContractIssue(
+            severity=SEVERITY_ERROR,
+            code="output.missing_metrics",
+            message="metrics not found",
+        )
+        out_dir = tmp_path / "slice_z01"
+        pair = PairUploadReadiness(
+            moving_id=1,
+            fixed_id=0,
+            status=PairUploadStatus.INVALID,
+            output_dir=out_dir,
+            issues=(issue1, issue2),
+        )
+        report = _make_readiness_report(
+            ready_count=0,
+            invalid_count=1,
+            pairs=(pair,),
+        )
+        widget = _make_upload_widget(tmp_path, [(0, 1)], {1})
+        _patch_upload_settings(monkeypatch)
+        monkeypatch.setattr(
+            widget_server_module,
+            "assess_upload_readiness",
+            lambda *a, **k: report,
+            raising=False,
+        )
+        _ScpWorkerRecorder.instances = []
+        monkeypatch.setattr(widget_server_module, "ScpWorker", _ScpWorkerRecorder)
+
+        critical_calls: list[tuple] = []
+
+        def record_critical(parent, title, body) -> None:
+            critical_calls.append((parent, title, body))
+
+        monkeypatch.setattr(
+            widget_server_module,
+            "QMessageBox",
+            type("QMessageBox", (), {"critical": staticmethod(record_critical)}),
+            raising=False,
+        )
+
+        widget._upload_to_server()
+
+        assert len(critical_calls) == 1
+        assert critical_calls[0][1] == "Upload blocked"
+        body = critical_calls[0][2]
+        assert report.summary_line() in body
+        assert issue1.code in body or "offsets.txt not found" in body
+        for line in report.error_lines():
+            assert line in body
+        assert widget.server_status_label.text.startswith("Upload blocked:")
+        assert len(_ScpWorkerRecorder.instances) == 0
+
+    def test_upload_blocked_zero_ready_message(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        issue = ContractIssue(
+            severity=SEVERITY_ERROR,
+            code="upload.not_saved",
+            message="Pair not saved in this session",
+        )
+        pair = PairUploadReadiness(
+            moving_id=1,
+            fixed_id=0,
+            status=PairUploadStatus.MISSING,
+            output_dir=None,
+            issues=(issue,),
+        )
+        report = _make_readiness_report(
+            ready_count=0,
+            missing_count=1,
+            pairs=(pair,),
+        )
+        widget = _make_upload_widget(tmp_path, [(0, 1)], set())
+        _patch_upload_settings(monkeypatch)
+        monkeypatch.setattr(
+            widget_server_module,
+            "assess_upload_readiness",
+            lambda *a, **k: report,
+            raising=False,
+        )
+
+        critical_calls: list[str] = []
+        monkeypatch.setattr(
+            widget_server_module,
+            "QMessageBox",
+            type("QMessageBox", (), {"critical": staticmethod(lambda _p, _t, body: critical_calls.append(body))}),
+            raising=False,
+        )
+        monkeypatch.setattr(widget_server_module, "ScpWorker", _ScpWorkerRecorder)
+
+        widget._upload_to_server()
+
+        assert len(critical_calls) == 1
+        assert "No pairs ready to upload" in critical_calls[0]
+
+    def test_confirm_shows_destination(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        ready_dir1 = tmp_path / "slice_z01"
+        ready_dir2 = tmp_path / "slice_z02"
+        ready_dir1.mkdir()
+        ready_dir2.mkdir()
+        pair1 = PairUploadReadiness(
+            moving_id=1,
+            fixed_id=0,
+            status=PairUploadStatus.READY,
+            output_dir=ready_dir1,
+            issues=(),
+        )
+        pair2 = PairUploadReadiness(
+            moving_id=2,
+            fixed_id=1,
+            status=PairUploadStatus.READY,
+            output_dir=ready_dir2,
+            issues=(),
+        )
+        report = _make_readiness_report(
+            ready_count=2,
+            pairs=(pair1, pair2),
+            ready_dirs=(ready_dir1, ready_dir2),
+        )
+        widget = _make_upload_widget(tmp_path, [(0, 1), (1, 2)], {1, 2})
+        _patch_upload_settings(monkeypatch)
+        monkeypatch.setattr(
+            widget_server_module,
+            "assess_upload_readiness",
+            lambda *a, **k: report,
+            raising=False,
+        )
+        _ScpWorkerRecorder.instances = []
+        monkeypatch.setattr(widget_server_module, "ScpWorker", _ScpWorkerRecorder)
+
+        ok_sentinel = 1
+        captured_dialogs: list[str] = []
+
+        class FakeMsgBox:
+            Question = 0
+            Ok = 1
+            Cancel = 2
+
+            def __init__(self, parent) -> None:
+                self._parent = parent
+                self.text = ""
+
+            def setWindowTitle(self, title: str) -> None:
+                self.title = title
+
+            def setText(self, text: str) -> None:
+                self.text = text
+                captured_dialogs.append(text)
+
+            def setIcon(self, icon) -> None:
+                pass
+
+            def setStandardButtons(self, buttons) -> None:
+                pass
+
+            def setDefaultButton(self, button) -> None:
+                pass
+
+            def button(self, role):
+                btn = MagicMock()
+                btn.setText = MagicMock()
+                return btn
+
+            def exec(self):
+                return ok_sentinel
+
+        monkeypatch.setattr(widget_server_module, "QMessageBox", FakeMsgBox, raising=False)
+
+        widget._upload_to_server()
+
+        expected_dest = (
+            "myserver.example.com:/scratch/workspace/sub-22/output/manual_transforms/"
+        )
+        assert len(captured_dialogs) == 1
+        assert expected_dest in captured_dialogs[0]
+        assert "Upload 2 pair(s)" in captured_dialogs[0]
+        assert len(_ScpWorkerRecorder.instances) == 1
+        worker_args = _ScpWorkerRecorder.instances[0].args
+        assert worker_args[2] == list(report.ready_dirs)
+        assert widget.btn_download.enabled is False
+        assert widget.btn_upload.enabled is False
+        assert widget.server_progress.shown is True
+        assert widget.server_status_label.text == "<i>Uploading...</i>"
+
+    def test_confirm_cancel_is_silent(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        ready_dir = tmp_path / "slice_z01"
+        ready_dir.mkdir()
+        pair = PairUploadReadiness(
+            moving_id=1,
+            fixed_id=0,
+            status=PairUploadStatus.READY,
+            output_dir=ready_dir,
+            issues=(),
+        )
+        report = _make_readiness_report(
+            ready_count=1,
+            pairs=(pair,),
+            ready_dirs=(ready_dir,),
+        )
+        widget = _make_upload_widget(tmp_path, [(0, 1)], {1})
+        _patch_upload_settings(monkeypatch)
+        monkeypatch.setattr(
+            widget_server_module,
+            "assess_upload_readiness",
+            lambda *a, **k: report,
+            raising=False,
+        )
+        _ScpWorkerRecorder.instances = []
+        monkeypatch.setattr(widget_server_module, "ScpWorker", _ScpWorkerRecorder)
+
+        cancel_sentinel = 2
+
+        class FakeMsgBox:
+            Question = 0
+            Ok = 1
+            Cancel = 2
+
+            def __init__(self, parent) -> None:
+                self.text = ""
+
+            def setWindowTitle(self, title: str) -> None:
+                pass
+
+            def setText(self, text: str) -> None:
+                self.text = text
+
+            def setIcon(self, icon) -> None:
+                pass
+
+            def setStandardButtons(self, buttons) -> None:
+                pass
+
+            def setDefaultButton(self, button) -> None:
+                pass
+
+            def button(self, role):
+                btn = MagicMock()
+                btn.setText = MagicMock()
+                return btn
+
+            def exec(self):
+                return cancel_sentinel
+
+        monkeypatch.setattr(widget_server_module, "QMessageBox", FakeMsgBox, raising=False)
+
+        widget._upload_to_server()
+
+        assert len(_ScpWorkerRecorder.instances) == 0
+        assert widget.server_status_label.text == report.summary_line()
+        assert "cancel" not in widget.server_status_label.text.lower()
+
+    def test_confirm_lists_warnings(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        ready_dir = tmp_path / "slice_z01"
+        ready_dir.mkdir()
+        warning = ContractIssue(
+            severity=SEVERITY_WARNING,
+            code="metadata.level_mismatch",
+            message="Pyramid level differs from package",
+        )
+        pair = PairUploadReadiness(
+            moving_id=1,
+            fixed_id=0,
+            status=PairUploadStatus.READY,
+            output_dir=ready_dir,
+            issues=(warning,),
+        )
+        report = _make_readiness_report(
+            ready_count=1,
+            warning_count=1,
+            pairs=(pair,),
+            ready_dirs=(ready_dir,),
+        )
+        widget = _make_upload_widget(tmp_path, [(0, 1)], {1})
+        _patch_upload_settings(monkeypatch)
+        monkeypatch.setattr(
+            widget_server_module,
+            "assess_upload_readiness",
+            lambda *a, **k: report,
+            raising=False,
+        )
+
+        captured: list[str] = []
+
+        class FakeMsgBox:
+            Question = 0
+            Ok = 1
+            Cancel = 2
+
+            def __init__(self, parent) -> None:
+                self.text = ""
+
+            def setWindowTitle(self, title: str) -> None:
+                pass
+
+            def setText(self, text: str) -> None:
+                self.text = text
+                captured.append(text)
+
+            def setIcon(self, icon) -> None:
+                pass
+
+            def setStandardButtons(self, buttons) -> None:
+                pass
+
+            def setDefaultButton(self, button) -> None:
+                pass
+
+            def button(self, role):
+                btn = MagicMock()
+                btn.setText = MagicMock()
+                return btn
+
+            def exec(self):
+                return FakeMsgBox.Cancel
+
+        monkeypatch.setattr(widget_server_module, "QMessageBox", FakeMsgBox, raising=False)
+        monkeypatch.setattr(widget_server_module, "ScpWorker", _ScpWorkerRecorder)
+
+        widget._upload_to_server()
+
+        assert len(captured) == 1
+        assert "Warnings:" in captured[0]
+        assert report.warning_lines()[0] in captured[0]
+
+    def test_local_only_noop(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        widget = _make_upload_widget(tmp_path, [(0, 1)], {1}, server_config=None)
+        initial_status = widget.server_status_label.text
+        _ScpWorkerRecorder.instances = []
+        monkeypatch.setattr(widget_server_module, "ScpWorker", _ScpWorkerRecorder)
+
+        widget._upload_to_server()
+
+        assert len(_ScpWorkerRecorder.instances) == 0
+        assert widget.server_status_label.text == initial_status
+
+    def test_revalidates_on_each_click(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        ready_dir = tmp_path / "slice_z01"
+        ready_dir.mkdir()
+        pair = PairUploadReadiness(
+            moving_id=1,
+            fixed_id=0,
+            status=PairUploadStatus.READY,
+            output_dir=ready_dir,
+            issues=(),
+        )
+        report = _make_readiness_report(
+            ready_count=1,
+            pairs=(pair,),
+            ready_dirs=(ready_dir,),
+        )
+        widget = _make_upload_widget(tmp_path, [(0, 1)], {1})
+        _patch_upload_settings(monkeypatch)
+        call_count = 0
+
+        def count_assess(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            return report
+
+        monkeypatch.setattr(
+            widget_server_module,
+            "assess_upload_readiness",
+            count_assess,
+            raising=False,
+        )
+        monkeypatch.setattr(widget_server_module, "ScpWorker", _ScpWorkerRecorder)
+
+        class FakeMsgBox:
+            Question = 0
+            Ok = 1
+            Cancel = 2
+
+            def __init__(self, parent) -> None:
+                pass
+
+            def setWindowTitle(self, title: str) -> None:
+                pass
+
+            def setText(self, text: str) -> None:
+                pass
+
+            def setIcon(self, icon) -> None:
+                pass
+
+            def setStandardButtons(self, buttons) -> None:
+                pass
+
+            def setDefaultButton(self, button) -> None:
+                pass
+
+            def button(self, role):
+                btn = MagicMock()
+                btn.setText = MagicMock()
+                return btn
+
+            def exec(self):
+                return FakeMsgBox.Cancel
+
+        monkeypatch.setattr(widget_server_module, "QMessageBox", FakeMsgBox, raising=False)
+
+        widget._upload_to_server()
+        widget._upload_to_server()
+
+        assert call_count == 2
+
+    def test_blocked_status_persists_after_dialog(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        issue = ContractIssue(
+            severity=SEVERITY_ERROR,
+            code="upload.not_saved",
+            message="Pair not saved in this session",
+        )
+        pair = PairUploadReadiness(
+            moving_id=1,
+            fixed_id=0,
+            status=PairUploadStatus.MISSING,
+            output_dir=None,
+            issues=(issue,),
+        )
+        report = _make_readiness_report(
+            ready_count=0,
+            missing_count=1,
+            pairs=(pair,),
+        )
+        widget = _make_upload_widget(tmp_path, [(0, 1)], set())
+        _patch_upload_settings(monkeypatch)
+        monkeypatch.setattr(
+            widget_server_module,
+            "assess_upload_readiness",
+            lambda *a, **k: report,
+            raising=False,
+        )
+        _ScpWorkerRecorder.instances = []
+        monkeypatch.setattr(widget_server_module, "ScpWorker", _ScpWorkerRecorder)
+        monkeypatch.setattr(
+            widget_server_module,
+            "QMessageBox",
+            type("QMessageBox", (), {"critical": staticmethod(lambda *_a: None)}),
+            raising=False,
+        )
+
+        widget._upload_to_server()
+
+        assert widget.server_status_label.text.startswith("Upload blocked:")
+        assert len(_ScpWorkerRecorder.instances) == 0
+
+    def test_on_upload_finished_restores_buttons(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        widget = _make_upload_widget(tmp_path, [(0, 1)], {1})
+        widget.btn_download.enabled = False
+        widget.btn_upload.enabled = False
+        widget.server_progress.shown = True
+
+        widget._on_upload_finished(True, "Uploaded 1 transforms to server")
+
+        assert widget.btn_download.enabled is True
+        assert widget.btn_upload.enabled is True
+        assert widget.server_progress.hidden is True
+        assert widget.server_status_label.text == "Uploaded 1 transforms to server"

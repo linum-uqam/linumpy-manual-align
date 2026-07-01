@@ -4,13 +4,17 @@ from __future__ import annotations
 
 from importlib import resources
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import linumpy_manual_align
+import pytest
 from linumpy_manual_align.remote import (
     ServerConfig,
     _cs_server_script,
     parse_server_config,
+    upload_manual_transforms,
 )
+from linumpy_manual_align.remote import scp_ops
 
 
 class TestParseServerConfig:
@@ -91,6 +95,110 @@ class TestServerConfig:
         assert cfg.host == "example.com"
         assert cfg.remote_output == "/data/output"
         assert cfg.subject_id == "sub-01"
+
+
+def _server_config() -> ServerConfig:
+    return ServerConfig(
+        host="h",
+        remote_output="/scratch/workspace/sub-22/output",
+        subject_id="sub-22",
+    )
+
+
+def _manual_transforms_tree(tmp_path: Path) -> Path:
+    root = tmp_path / "manual_transforms"
+    for name in ("slice_z01", "slice_z02", "slice_z99"):
+        d = root / name
+        d.mkdir(parents=True)
+        (d / "transform.tfm").touch()
+    return root
+
+
+class TestUploadManualTransforms:
+    @pytest.fixture
+    def mocks(self, monkeypatch: pytest.MonkeyPatch) -> dict:
+        captured: dict = {"scp_args": None, "scp_called": False}
+
+        def fake_run_scp(args: list[str], description: str) -> tuple[bool, str]:
+            captured["scp_args"] = args
+            captured["scp_called"] = True
+            return True, "OK"
+
+        monkeypatch.setattr(scp_ops, "_run_scp", fake_run_scp)
+        monkeypatch.setattr(
+            scp_ops.subprocess,
+            "run",
+            MagicMock(return_value=MagicMock(returncode=0)),
+        )
+        return captured
+
+    def test_explicit_slice_dirs_uploads_only_those(
+        self, tmp_path: Path, mocks: dict
+    ) -> None:
+        root = _manual_transforms_tree(tmp_path)
+        cfg = _server_config()
+
+        ok, msg = upload_manual_transforms(
+            cfg,
+            root,
+            slice_dirs=[root / "slice_z01", root / "slice_z02"],
+        )
+
+        assert ok is True
+        assert "2 transforms" in msg
+        scp_args = mocks["scp_args"]
+        assert scp_args is not None
+        paths = [a for a in scp_args if not a.startswith("-") and ":" not in a]
+        assert str(root / "slice_z01") in paths
+        assert str(root / "slice_z02") in paths
+        assert str(root / "slice_z99") not in paths
+
+    def test_none_slice_dirs_falls_back_to_glob(
+        self, tmp_path: Path, mocks: dict
+    ) -> None:
+        root = _manual_transforms_tree(tmp_path)
+        cfg = _server_config()
+
+        ok, msg = upload_manual_transforms(cfg, root, slice_dirs=None)
+
+        assert ok is True
+        assert "3 transforms" in msg
+        scp_args = mocks["scp_args"]
+        assert scp_args is not None
+        paths = [a for a in scp_args if not a.startswith("-") and ":" not in a]
+        assert str(root / "slice_z01") in paths
+        assert str(root / "slice_z02") in paths
+        assert str(root / "slice_z99") in paths
+
+    def test_empty_slice_dirs_returns_error_without_scp(
+        self, tmp_path: Path, mocks: dict
+    ) -> None:
+        root = _manual_transforms_tree(tmp_path)
+        cfg = _server_config()
+
+        ok, msg = upload_manual_transforms(cfg, root, slice_dirs=[])
+
+        assert ok is False
+        assert msg
+        assert mocks["scp_called"] is False
+
+    def test_slice_dir_outside_root_is_rejected(
+        self, tmp_path: Path, mocks: dict
+    ) -> None:
+        root = _manual_transforms_tree(tmp_path)
+        outside = tmp_path / "elsewhere" / "slice_z05"
+        outside.mkdir(parents=True)
+        cfg = _server_config()
+
+        ok, msg = upload_manual_transforms(
+            cfg,
+            root,
+            slice_dirs=[root / "slice_z01", outside],
+        )
+
+        assert ok is False
+        assert str(outside) in msg
+        assert mocks["scp_called"] is False
 
 
 class TestCsServerScript:

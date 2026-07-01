@@ -96,9 +96,20 @@ def download_manual_align_package(
     return True, f"Downloaded {n_aips} AIPs to {local_dir}"
 
 
+def _dirs_within_root(dirs: list[Path], root: Path) -> Path | None:
+    """Return the first dir not contained under root, or None if all are contained."""
+    resolved_root = root.resolve()
+    for d in dirs:
+        resolved = Path(d).resolve()
+        if resolved != resolved_root and not resolved.is_relative_to(resolved_root):
+            return Path(d)
+    return None
+
+
 def upload_manual_transforms(
     server: ServerConfig,
     local_transforms_dir: Path,
+    slice_dirs: list[Path] | None = None,
 ) -> tuple[bool, str]:
     """Upload manual transforms to the server.
 
@@ -111,6 +122,9 @@ def upload_manual_transforms(
         Server connection details.
     local_transforms_dir : Path
         Local directory containing slice_z##/ subdirs with .tfm files.
+    slice_dirs : list[Path] | None, optional
+        Explicit slice directories to upload. When None, all ``slice_z*``
+        subdirectories under ``local_transforms_dir`` are discovered via glob.
 
     Returns
     -------
@@ -121,10 +135,21 @@ def upload_manual_transforms(
     if not local_transforms_dir.exists():
         return False, f"Local transforms directory not found: {local_transforms_dir}"
 
-    # Find all slice directories
-    slice_dirs = sorted(local_transforms_dir.glob("slice_z*"))
+    slice_dirs = (
+        sorted(local_transforms_dir.glob("slice_z*"))
+        if slice_dirs is None
+        else [Path(d) for d in slice_dirs]
+    )
+
     if not slice_dirs:
-        return False, "No slice_z* directories found to upload"
+        return False, "No slice directories to upload"
+
+    offending = _dirs_within_root(slice_dirs, local_transforms_dir)
+    if offending is not None:
+        return (
+            False,
+            f"Refusing to upload directory outside {local_transforms_dir}: {offending}",
+        )
 
     remote_dest = f"{server.remote_output}/manual_transforms/"
 
