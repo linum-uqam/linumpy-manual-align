@@ -2,17 +2,14 @@
 
 from __future__ import annotations
 
-import contextlib
-
 import numpy as np
 
 from linumpy_manual_align.io.image_utils import (
     OVERLAY_COLOR,
-    OVERLAY_DIFF,
     apply_transform,
-    build_overlay,
 )
 from linumpy_manual_align.state import AlignmentState
+from linumpy_manual_align.ui import napari_layers
 from linumpy_manual_align.ui.widget_typing import ManualAlignWidget
 
 
@@ -27,34 +24,17 @@ class OverlayStateMixin:
         return apply_transform(moving, rotation=state.rotation, tx=state.tx, ty=state.ty)
 
     def _rebuild_layer_visibility(self: ManualAlignWidget) -> None:
-        is_color = self._overlay_mode == OVERLAY_COLOR
-        colormap = "inferno" if self._overlay_mode == OVERLAY_DIFF else "gray"
-
-        if self.fixed_layer is not None:
-            self.fixed_layer.visible = is_color
-        if self.moving_layer is not None:
-            self.moving_layer.visible = is_color
-
-        if is_color:
-            # Switching to color mode — remove composite if present.
-            if self._composite_layer is not None:
-                with contextlib.suppress(ValueError):
-                    self.viewer.layers.remove(self._composite_layer)
-                self._composite_layer = None
-        elif self._composite_layer is not None:
-            # Already have a composite layer; just update the colormap in-place
-            # (avoids tearing down and recreating the layer when switching Diff ↔ Checker).
-            self._composite_layer.colormap = colormap
-        elif self._original_fixed_aip is not None and self.fixed_layer is not None:
-            comp = np.zeros_like(self._original_fixed_aip)
-            self._composite_layer = self.viewer.add_image(
-                comp,
-                name="Composite",
-                colormap=colormap,
-                blending="translucent",
-                contrast_limits=(0.0, 1.0),
-                scale=list(self.fixed_layer.scale),
-            )
+        scale = list(self.fixed_layer.scale) if self.fixed_layer is not None else [1.0, 1.0]
+        self._composite_layer = napari_layers.set_overlay_mode(
+            self.viewer,
+            overlay_mode=self._overlay_mode,
+            fixed_layer=self.fixed_layer,
+            moving_layer=self.moving_layer,
+            composite_layer=self._composite_layer,
+            base_image=self._original_fixed_aip,
+            scale=scale,
+            projection_mode=self._projection_mode,
+        )
 
     def _refresh_composite(self: ManualAlignWidget, state: AlignmentState) -> None:
         """Recompute and push composite image data for non-color overlay modes."""
@@ -63,10 +43,12 @@ class OverlayStateMixin:
         if self._original_fixed_aip is None or self._original_moving_aip is None:
             return
         shifted = self._make_shifted_moving(state)
-        self._composite_layer.data = build_overlay(
-            self._original_fixed_aip,
-            shifted,
-            mode=self._overlay_mode,
+        napari_layers.refresh_composite(
+            self.viewer,
+            overlay_mode=self._overlay_mode,
+            composite_layer=self._composite_layer,
+            fixed_base=self._original_fixed_aip,
+            shifted_moving=shifted,
             tile_size=self.spin_tile.value(),
         )
 

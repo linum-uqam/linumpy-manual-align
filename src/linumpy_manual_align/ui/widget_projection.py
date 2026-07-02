@@ -54,6 +54,7 @@ class ProjectionEventMixin:
             self._projection_mode = "xz" if self._btn_proj_xz.isChecked() else "yz"
             self._mode_stack.setCurrentIndex(1)
         if self.pairs:
+            # Projection mode change always full teardown (D-09); incremental only in XY.
             self._load_pair_preserve_camera(self.current_pair_idx)
 
     def _on_z_proj_changed(self: ManualAlignWidget, btn_id: int) -> None:

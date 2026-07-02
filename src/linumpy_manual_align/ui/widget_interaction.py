@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import numpy as np
-from qtpy.QtCore import QTimer
 
 from linumpy_manual_align.io.image_utils import (
     ENHANCE_CLAHE,
@@ -137,11 +136,8 @@ class InteractionMixin:
         self.viewer.camera.center = center
 
     def _load_pair_preserve_camera(self: ManualAlignWidget, idx: int) -> None:
-        """Load a pair while keeping the current zoom level and position."""
-        zoom = self.viewer.camera.zoom
-        center = tuple(self.viewer.camera.center)
-        self._load_pair(idx, preserve_camera=True)
-        QTimer.singleShot(0, lambda: self._restore_camera(zoom, center))
+        """Load a pair; recenter is handled by _maybe_recenter_after_load inside _load_pair."""
+        self._load_pair(idx)
 
     def _toggle_z_proj(self: ManualAlignWidget) -> None:
         """Switch between XZ and YZ views (Z alignment mode only)."""

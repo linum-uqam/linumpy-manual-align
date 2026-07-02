@@ -82,6 +82,9 @@ known-first-party = ["linumpy_manual_align"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+markers = [
+    "napari_benchmark: optional headless memory/perf benchmark; excluded from default CI (wired in Phase 12 GUI-01 suite)",
+]
 # SimpleITK (SWIG) and transitive pydantic deprecations are noisy but outside this repo.
 filterwarnings = [
     "ignore:builtin type SwigPyPacked has no __module__ attribute:DeprecationWarning",
@@ -121,6 +124,7 @@ dev = [
     "pytest>=9.0.3",
     "import-linter>=2.12",
     "pytest-cov>=7.1",
+    "pytest-qt>=4.5.0",
 ]
 
 # --- import-linter ---

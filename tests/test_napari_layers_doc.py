@@ -31,3 +31,8 @@ def test_module_docstring_documents_ownership_and_exclusions() -> None:
     assert "OverlayStateMixin" in doc
     assert "CrossSectionMixin" in doc
     assert "pop(0)" in doc or "teardown" in doc.lower()
+
+
+def test_module_docstring_references_hot_paths_audit() -> None:
+    doc = napari_layers_module.__doc__ or ""
+    assert "NAPI-HOT-PATHS" in doc

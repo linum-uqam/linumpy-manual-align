@@ -20,6 +20,7 @@ from linumpy_manual_align.io.image_utils import (
     content_bbox,
     enhance_aip,
     normalize_aip,
+    OVERLAY_COLOR,
 )
 from linumpy_manual_align.io.omezarr_io import load_aip_from_ome_zarr
 from linumpy_manual_align.io.transform_io import (
@@ -31,6 +32,7 @@ from linumpy_manual_align.io.transform_io import (
     load_transform,
 )
 from linumpy_manual_align.state import AlignmentState, UndoStack
+from linumpy_manual_align.ui import napari_layers
 from linumpy_manual_align.ui.widget_typing import ManualAlignWidget
 
 logger = logging.getLogger(__name__)
@@ -147,6 +149,96 @@ class PairLoadingMixin:
             tx, ty = adjust_for_rotation_center(tx, ty, rot, tfm_center, (img_center[0] * scale, img_center[1] * scale))
         return AlignmentState(tx=tx / scale, ty=ty / scale, rotation=rot)
 
+    def _can_incremental_update(
+        self: ManualAlignWidget,
+        *,
+        fixed_aip: np.ndarray,
+        moving_aip: np.ndarray,
+        fixed_scale: list[float],
+        moving_scale: list[float],
+    ) -> bool:
+        """Return True when an in-place layer data push is safe (D-01/D-02/D-04)."""
+        if self.fixed_layer is None or self.moving_layer is None:
+            logger.debug("incremental pair switch: False (first load)")
+            return False
+        if fixed_aip.shape != self.fixed_layer.data.shape:
+            logger.debug(
+                "incremental pair switch: False (shape mismatch fixed %s vs %s)",
+                fixed_aip.shape,
+                self.fixed_layer.data.shape,
+            )
+            return False
+        if moving_aip.shape != self.moving_layer.data.shape:
+            logger.debug(
+                "incremental pair switch: False (shape mismatch moving %s vs %s)",
+                moving_aip.shape,
+                self.moving_layer.data.shape,
+            )
+            return False
+        if list(fixed_scale) != list(self.fixed_layer.scale):
+            logger.debug(
+                "incremental pair switch: False (scale mismatch fixed %s vs %s)",
+                fixed_scale,
+                list(self.fixed_layer.scale),
+            )
+            return False
+        if list(moving_scale) != list(self.moving_layer.scale):
+            logger.debug(
+                "incremental pair switch: False (scale mismatch moving %s vs %s)",
+                moving_scale,
+                list(self.moving_layer.scale),
+            )
+            return False
+        logger.debug("incremental pair switch: True")
+        return True
+
+    def _maybe_recenter_after_load(
+        self: ManualAlignWidget,
+        *,
+        full_teardown: bool,
+        preserve_camera: bool,
+    ) -> None:
+        """Recenter the viewer when the load path requires it."""
+        if not napari_layers.should_recenter_on_switch(
+            projection_mode=self._projection_mode,
+            full_teardown=full_teardown,
+            preserve_camera=preserve_camera,
+        ):
+            return
+        if self._projection_mode == "xy":
+            self.viewer.reset_view()
+        else:
+            self._content_fit_after_load()
+
+    def _content_fit_after_load(self: ManualAlignWidget) -> None:
+        """Fit the Z-mode camera to the moving tissue after pair load.
+
+        Uncropped XZ/YZ layers span the full column extent; a plain
+        ``reset_view`` leaves tissue as a small off-center strip. Re-center on
+        the moving tissue and zoom into its column width so it fills the view.
+        """
+        self.viewer.reset_view()
+
+        layer = getattr(self, "moving_layer", None)
+        if layer is None:
+            return
+
+        triple = (
+            np.asarray(layer.data),
+            tuple(layer.scale),
+            tuple(layer.translate),
+        )
+        center = napari_layers.content_center_world([triple])
+        factor = napari_layers.content_fit_zoom_factor(triple)
+        if center is None or factor is None:
+            return
+
+        cam_center = list(self.viewer.camera.center)
+        cam_center[-2] = center[0]
+        cam_center[-1] = center[1]
+        self.viewer.camera.center = tuple(cam_center)
+        self.viewer.camera.zoom = self.viewer.camera.zoom * factor
+
     def _load_pair(self: ManualAlignWidget, idx: int, preserve_camera: bool = False) -> None:
         """Load a slice pair and display as red/green AIP overlay."""
         self.current_pair_idx = idx
@@ -257,45 +349,51 @@ class PairLoadingMixin:
                 r1 + moving_aip.shape[0] / 2.0,
             )  # (cx, cy) in original working-level pixel coords
 
-        # Snapshot layer visual settings so they survive the pair switch.
-        # On first load the layers don't exist yet, so fall back to defaults.
-        fixed_gamma = self.fixed_layer.gamma if self.fixed_layer is not None else 0.6
-        fixed_opacity = self.fixed_layer.opacity if self.fixed_layer is not None else 1.0
-        fixed_clim = tuple(self.fixed_layer.contrast_limits) if self.fixed_layer is not None else (0.0, 1.0)
-        moving_gamma = self.moving_layer.gamma if self.moving_layer is not None else 0.6
-        moving_opacity = self.moving_layer.opacity if self.moving_layer is not None else 1.0
-        moving_clim = tuple(self.moving_layer.contrast_limits) if self.moving_layer is not None else (0.0, 1.0)
-
-        # Remove existing layers (including stale composite)
-        self._composite_layer = None
-        while len(self.viewer.layers) > 0:
-            self.viewer.layers.pop(0)
-
-        view_suffix = {"xy": "", "xz": " (XZ)", "yz": " (YZ)"}.get(self._projection_mode, "")
-
         self._moving_scale_yx = list(moving_scale_yx)
 
-        # Recreate layers, restoring any settings the user adjusted in napari's layer controls.
-        self.fixed_layer = self.viewer.add_image(
-            fixed_aip,
-            name=f"Fixed z{fid:02d}{view_suffix}",
-            colormap="green",
-            blending="additive",
-            contrast_limits=fixed_clim,
-            gamma=fixed_gamma,
-            opacity=fixed_opacity,
-            scale=fixed_scale_yx,
+        use_incremental = self._projection_mode == "xy" and self._can_incremental_update(
+            fixed_aip=fixed_aip,
+            moving_aip=moving_aip,
+            fixed_scale=fixed_scale_yx,
+            moving_scale=moving_scale_yx,
         )
-        self.moving_layer = self.viewer.add_image(
-            moving_aip,
-            name=f"Moving z{mid:02d}{view_suffix}",
-            colormap="red",
-            blending="additive",
-            contrast_limits=moving_clim,
-            gamma=moving_gamma,
-            opacity=moving_opacity,
-            scale=list(moving_scale_yx),
-        )
+
+        if use_incremental:
+            napari_layers.update_pair_data(
+                self.viewer,
+                fixed_layer=self.fixed_layer,
+                moving_layer=self.moving_layer,
+                fixed_data=fixed_aip,
+                moving_data=moving_aip,
+            )
+            full_teardown = False
+        else:
+            # Snapshot layer visual settings so they survive full teardown (D-03).
+            fixed_gamma = self.fixed_layer.gamma if self.fixed_layer is not None else 0.6
+            fixed_opacity = self.fixed_layer.opacity if self.fixed_layer is not None else 1.0
+            fixed_clim = tuple(self.fixed_layer.contrast_limits) if self.fixed_layer is not None else (0.0, 1.0)
+            moving_gamma = self.moving_layer.gamma if self.moving_layer is not None else 0.6
+            moving_opacity = self.moving_layer.opacity if self.moving_layer is not None else 1.0
+            moving_clim = tuple(self.moving_layer.contrast_limits) if self.moving_layer is not None else (0.0, 1.0)
+
+            self._composite_layer = None
+            self.fixed_layer, self.moving_layer = napari_layers.create_pair_layers(
+                self.viewer,
+                fixed_data=fixed_aip,
+                moving_data=moving_aip,
+                fixed_scale=fixed_scale_yx,
+                moving_scale=moving_scale_yx,
+                fixed_gamma=fixed_gamma,
+                fixed_opacity=fixed_opacity,
+                fixed_clim=fixed_clim,
+                moving_gamma=moving_gamma,
+                moving_opacity=moving_opacity,
+                moving_clim=moving_clim,
+                fid=fid,
+                mid=mid,
+                projection_mode=self._projection_mode,
+            )
+            full_teardown = True
 
         # Adjust visibility / add composite layer based on current overlay mode
         self._rebuild_layer_visibility()
@@ -331,6 +429,16 @@ class PairLoadingMixin:
         state = self.undo_stacks[mid].current
         self._apply_state(state, push=False)
 
+        if use_incremental and self._overlay_mode != OVERLAY_COLOR and self._composite_layer is not None:
+            napari_layers.refresh_composite(
+                self.viewer,
+                overlay_mode=self._overlay_mode,
+                composite_layer=self._composite_layer,
+                fixed_base=self._original_fixed_aip,
+                shifted_moving=self._make_shifted_moving(state),
+                tile_size=self.spin_tile.value(),
+            )
+
         # Update UI
         with self._suppress_events():
             self.pair_combo.setCurrentIndex(idx)
@@ -359,6 +467,14 @@ class PairLoadingMixin:
         else:
             self._set_cs_sliders_visible(False)
 
-        if not preserve_camera:
-            self.viewer.reset_view()
+        self._maybe_recenter_after_load(
+            full_teardown=full_teardown,
+            preserve_camera=preserve_camera,
+        )
+        napari_layers.assert_layer_inventory(
+            self.viewer,
+            projection_mode=self._projection_mode,
+            overlay_mode=self._overlay_mode,
+            overlay_color=OVERLAY_COLOR,
+        )
         self.viewer.status = f"Pair z{fid:02d} → z{mid:02d} loaded ({self._projection_mode.upper()} view)"

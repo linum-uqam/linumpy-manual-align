@@ -10,6 +10,7 @@ import numpy as np
 from linumpy_manual_align.contracts.layout import manual_output_dir
 from linumpy_manual_align.io.image_utils import enhance_aip, normalize_aip
 from linumpy_manual_align.io.transform_io import load_center_pos_from_npz
+from linumpy_manual_align.ui import napari_layers
 from linumpy_manual_align.ui.widget_typing import ManualAlignWidget
 
 logger = logging.getLogger(__name__)
@@ -213,7 +214,47 @@ class CrossSectionMixin:
         if pos != slider_pos:
             return
         if self.moving_layer is not None:
-            self.moving_layer.data = enhance_aip(normalize_aip(np.asarray(img, dtype=np.float32)), self._enhance_mode)
+            prev_shape = self.moving_layer.data.shape
+            new_frame = enhance_aip(normalize_aip(np.asarray(img, dtype=np.float32)), self._enhance_mode)
+            self.moving_layer.data = new_frame
+            self._maybe_recenter_after_cross_section(prev_shape, new_frame.shape)
+
+    def _maybe_recenter_after_cross_section(
+        self: ManualAlignWidget, prev_shape: tuple[int, ...], new_shape: tuple[int, ...]
+    ) -> None:
+        """Pan the camera to the moving layer tissue center after a Z cross-section frame.
+
+        Only the moving layer updates on scroll; the fixed XZ/YZ layer is static and
+        often spans most of the uncropped canvas. Panning to a combined fixed+moving
+        union center dampens the pan (~half rate on wide exports). We pan to the
+        moving content center only, preserving zoom.
+        """
+        if not napari_layers.should_recenter_after_cross_section(
+            projection_mode=self._projection_mode,
+            prev_shape=prev_shape,
+            new_shape=new_shape,
+        ):
+            return
+
+        if self.moving_layer is None:
+            return
+
+        layer_triples = [
+            (
+                np.asarray(self.moving_layer.data),
+                tuple(self.moving_layer.scale),
+                tuple(self.moving_layer.translate),
+            )
+        ]
+
+        center = napari_layers.content_center_world(layer_triples)
+        if center is None:
+            return
+
+        cam_center = list(self.viewer.camera.center)
+        cam_center[-2] = center[0]
+        cam_center[-1] = center[1]
+        self.viewer.camera.center = tuple(cam_center)
 
     def _on_cross_section_failed(self: ManualAlignWidget, sid: int, axis: str, pos: int, msg: str) -> None:
         logger.warning("Cross-section fetch failed z%02d %s[%d]: %s", sid, axis, pos, msg)

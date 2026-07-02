@@ -13,6 +13,28 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 
+@pytest.fixture
+def make_napari_viewer():
+    """Headless viewer factory using ``ViewerModel`` (no OpenGL / Qt window).
+
+    Napari's plugin ``make_napari_viewer`` requires a live GL context and can
+    segfault under offscreen CI; ``ViewerModel`` exposes the same layer API used
+    by ``napari_layers`` without initializing vispy.
+    """
+    from napari.components import ViewerModel
+
+    created: list[ViewerModel] = []
+
+    def _make(show: bool = False, **_kwargs: object) -> ViewerModel:
+        del show  # ViewerModel has no window; ``show`` kept for API compatibility.
+        viewer = ViewerModel()
+        created.append(viewer)
+        return viewer
+
+    yield _make
+    created.clear()
+
+
 @pytest.fixture(scope="session")
 def qapp():
     """Session-scoped QApplication instance, required for QObject-based tests."""
@@ -36,6 +58,20 @@ def fake_data_package(tmp_path: Path) -> Path:
         scale = np.array([1.0, 0.01, 0.01])
         np.savez(str(aips / f"slice_z{i:02d}.npz"), aip=aip, scale=scale)
 
+    return pkg
+
+
+@pytest.fixture
+def fake_multi_pair_package(tmp_path: Path) -> Path:
+    """Temp package with ≥3 same-shape XY pairs for incremental switch benchmarks."""
+    pkg = tmp_path / "manual_align_package"
+    aips = pkg / "aips"
+    aips.mkdir(parents=True)
+    shape = (32, 32)
+    scale = np.array([1.0, 0.01, 0.01], dtype=np.float64)
+    for i in range(4):
+        aip = np.full(shape, 0.1 * (i + 1), dtype=np.float32)
+        np.savez(str(aips / f"slice_z{i:02d}.npz"), aip=aip, scale=scale)
     return pkg
 
 
