@@ -6,9 +6,8 @@ from pathlib import Path
 
 from qtpy.QtWidgets import QFileDialog, QMessageBox
 
-from linumpy_manual_align.contracts import UploadReadinessReport, assess_upload_readiness, load_manual_align_metadata, moving_ids_from_slice_dirs
-from linumpy_manual_align.contracts.models import SEVERITY_WARNING
-from linumpy_manual_align.io.transform_io import discover_aips, discover_pair_aips, discover_transforms
+from linumpy_manual_align.contracts import UploadReadinessReport, assess_upload_readiness, moving_ids_from_slice_dirs
+from linumpy_manual_align.io.package_ingest import find_downloaded_package, ingest_manual_align_package
 from linumpy_manual_align.remote import ScpWorker
 from linumpy_manual_align.settings import settings
 from linumpy_manual_align.settings_runtime import (
@@ -59,28 +58,9 @@ class ServerMixin:
         self._worker = None  # drop Python ref; Qt cleanup via deleteLater
 
         if ok:
-            pkg_aips = local_dir / "manual_align_package" / "aips"
-            if not pkg_aips.exists():
-                pkg_aips = local_dir / "aips"
-            if pkg_aips.exists():
-                self.aips_dir = pkg_aips
-                self.slice_paths = discover_aips(pkg_aips)
-                self.slice_ids = list(self.slice_paths.keys())
-                self.pair_paths_xy = discover_pair_aips(pkg_aips)
-
-                # Discover axis-specific AIPs
-                self._discover_axis_aip_dirs(pkg_aips.parent)
-
-                self._apply_package_metadata(pkg_aips.parent, msg)
-
-                # Reload transforms too if available
-                pkg_tfm = local_dir / "manual_align_package" / "transforms"
-                if not pkg_tfm.exists():
-                    pkg_tfm = local_dir / "transforms"
-                if pkg_tfm.exists():
-                    self.transforms_dir = pkg_tfm
-                    self.existing_transforms = discover_transforms(pkg_tfm)
-                # Refresh saved pairs from disk then rebuild
+            result = ingest_manual_align_package(local_dir)
+            self._apply_package_ingest(result, base_status=msg)
+            if result.aips_dir is not None:
                 self._refresh_saved_pairs()
                 self._rebuild_pairs()
                 if hasattr(self, "_refresh_session_state"):
@@ -278,47 +258,16 @@ class ServerMixin:
 
     def _find_existing_package(self: ManualAlignWidget) -> Path | None:
         """Return the aips/ dir of an already-downloaded package, or None."""
-        candidates = [
-            self.output_dir.parent / "server_package" / "manual_align_package" / "aips",
-            self.output_dir.parent / "server_package" / "aips",
-        ]
-        for path in candidates:
-            if path.exists() and any(path.glob("*.npz")):
-                return path
-        return None
-
-    def _apply_package_metadata(self: ManualAlignWidget, pkg_root: Path, base_status: str) -> None:
-        """Load package metadata once and apply level, cross-section, and warning text."""
-        normalized, issues = load_manual_align_metadata(pkg_root)
-        if normalized.pyramid_level_explicit:
-            self.level = normalized.pyramid_level
-        self._cs_mgr.apply_metadata(normalized, issues)
-        warnings = [issue.message for issue in issues if issue.severity == SEVERITY_WARNING]
-        if warnings:
-            self.server_status_label.setText(base_status + "\n" + "\n".join(warnings))
-        else:
-            self.server_status_label.setText(base_status)
+        return find_downloaded_package(self.output_dir)
 
     def _load_existing_package(
         self: ManualAlignWidget, aips_dir: Path, *, base_status: str = "Existing package loaded"
     ) -> None:
         """Load a previously downloaded package without hitting the server."""
-        self.aips_dir = aips_dir
-        self.slice_paths = discover_aips(aips_dir)
-        self.slice_ids = list(self.slice_paths.keys())
-        self.pair_paths_xy = discover_pair_aips(aips_dir)
-
-        # Discover axis-specific AIPs
-        self._discover_axis_aip_dirs(aips_dir.parent)
-
-        # Load transforms alongside the aips if present
-        for tfm_candidate in (aips_dir.parent / "transforms", aips_dir.parent.parent / "transforms"):
-            if tfm_candidate.exists():
-                self.transforms_dir = tfm_candidate
-                self.existing_transforms = discover_transforms(tfm_candidate)
-                break
-
-        self._apply_package_metadata(aips_dir.parent, base_status)
+        result = ingest_manual_align_package(aips_dir)
+        self._apply_package_ingest(result, base_status=base_status)
+        if result.aips_dir is None:
+            return
 
         self._refresh_saved_pairs()
         self._rebuild_pairs()

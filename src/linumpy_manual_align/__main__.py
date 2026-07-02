@@ -32,7 +32,8 @@ import logging
 from pathlib import Path
 
 from linumpy_manual_align.contracts import MANUAL_TRANSFORMS_DIRNAME, load_manual_align_metadata
-from linumpy_manual_align.contracts.models import SEVERITY_WARNING
+from linumpy_manual_align.contracts.models import SEVERITY_ERROR, SEVERITY_WARNING
+from linumpy_manual_align.io.package_ingest import ingest_manual_align_package
 
 
 logger = logging.getLogger(__name__)
@@ -67,6 +68,29 @@ def resolve_package_level(data_package: Path | None) -> int | None:
     if not normalized.pyramid_level_explicit:
         return None
     return normalized.pyramid_level
+
+
+def _apply_ingest_to_cli_paths(
+    pkg: Path,
+    args: argparse.Namespace,
+) -> tuple[Path | None, Path | None, Path | None]:
+    """Resolve CLI package paths via the shared ingest helper."""
+    result = ingest_manual_align_package(pkg)
+    for issue in result.issues:
+        if issue.severity == SEVERITY_ERROR:
+            logger.error("%s: %s", issue.code, issue.message)
+        elif issue.severity == SEVERITY_WARNING:
+            logger.warning("%s: %s", issue.code, issue.message)
+
+    if result.aips_dir is None:
+        return None, None, None
+
+    if args.transforms_dir is None and result.transforms_dir is not None:
+        args.transforms_dir = result.transforms_dir
+    if args.level is None and result.metadata.pyramid_level_explicit:
+        args.level = result.metadata.pyramid_level
+
+    return result.aips_dir, result.aips_xz_dir, result.aips_yz_dir
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -150,25 +174,7 @@ def main(argv: list[str] | None = None) -> None:
     aips_xz_dir = None
     aips_yz_dir = None
     if args.data_package is not None:
-        pkg = Path(args.data_package)
-        aips_dir = pkg / "aips"
-        if not aips_dir.exists():
-            raise FileNotFoundError(f"AIPs directory not found in data package: {aips_dir}")
-        # Discover axis-specific AIP directories
-        if (pkg / "aips_xz").exists():
-            aips_xz_dir = pkg / "aips_xz"
-        if (pkg / "aips_yz").exists():
-            aips_yz_dir = pkg / "aips_yz"
-        # Use package transforms unless explicitly overridden
-        if args.transforms_dir is None:
-            pkg_tfm = pkg / "transforms"
-            if pkg_tfm.exists():
-                args.transforms_dir = pkg_tfm
-        # Read level from package metadata if not explicitly set
-        if args.level is None:
-            pkg_level = resolve_package_level(pkg)
-            if pkg_level is not None:
-                args.level = pkg_level
+        aips_dir, aips_xz_dir, aips_yz_dir = _apply_ingest_to_cli_paths(Path(args.data_package), args)
     elif args.input_dir is None and args.server_config is None:
         from qtpy.QtWidgets import QApplication, QFileDialog, QMessageBox
 
@@ -188,22 +194,9 @@ def main(argv: list[str] | None = None) -> None:
         else:
             # Assume it's inside a data package — go up to the package root
             args.data_package = chosen.parent if chosen.name != chosen.parent.name else chosen
-            pkg = Path(args.data_package)
-            aips_dir = pkg / "aips"
-            if not aips_dir.exists():
-                raise FileNotFoundError(f"AIPs directory not found in data package: {aips_dir}")
-            if (pkg / "aips_xz").exists():
-                aips_xz_dir = pkg / "aips_xz"
-            if (pkg / "aips_yz").exists():
-                aips_yz_dir = pkg / "aips_yz"
-            if args.transforms_dir is None:
-                pkg_tfm = pkg / "transforms"
-                if pkg_tfm.exists():
-                    args.transforms_dir = pkg_tfm
-            if args.level is None:
-                pkg_level = resolve_package_level(pkg)
-                if pkg_level is not None:
-                    args.level = pkg_level
+            aips_dir, aips_xz_dir, aips_yz_dir = _apply_ingest_to_cli_paths(
+                Path(args.data_package), args
+            )
 
     if args.output_dir is None:
         args.output_dir = resolve_output_dir(args.data_package, args.input_dir, args.server_config)

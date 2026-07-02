@@ -14,6 +14,8 @@ from linumpy_manual_align.contracts.layout import (
     discover_manual_slice_dirs,
     manual_output_dir,
 )
+from linumpy_manual_align.contracts.models import SEVERITY_WARNING
+from linumpy_manual_align.io.package_ingest import PackageIngestResult
 from linumpy_manual_align.io.image_utils import (
     content_bbox,
     enhance_aip,
@@ -60,6 +62,49 @@ class PairLoadingMixin:
         self._btn_mode_z.setEnabled(has_axis_aips)
         if has_axis_aips:
             self._btn_mode_z.setToolTip("Depth alignment: adjust Z-overlap offsets, view XZ/YZ cross-sections")
+
+    def _apply_package_ingest(
+        self: ManualAlignWidget, result: PackageIngestResult, *, base_status: str
+    ) -> None:
+        """Apply a shared package ingest result to widget state."""
+        if result.aips_dir is None:
+            warnings = [issue.message for issue in result.issues if issue.severity == SEVERITY_WARNING]
+            if warnings:
+                self.server_status_label.setText(base_status + "\n" + "\n".join(warnings))
+            else:
+                self.server_status_label.setText(base_status)
+            return
+
+        self.aips_dir = result.aips_dir
+        self.slice_paths = result.slice_paths
+        self.slice_ids = list(result.slice_paths.keys())
+        self.pair_paths_xy = result.pair_paths_xy
+        self.aips_xz_dir = result.aips_xz_dir
+        self.aips_yz_dir = result.aips_yz_dir
+        self.slice_paths_xz = result.slice_paths_xz
+        self.slice_paths_yz = result.slice_paths_yz
+        self.pair_paths_xz = result.pair_paths_xz
+        self.pair_paths_yz = result.pair_paths_yz
+        if result.transforms_dir is not None:
+            self.transforms_dir = result.transforms_dir
+            self.existing_transforms = result.existing_transforms
+
+        if result.metadata.pyramid_level_explicit:
+            self.level = result.metadata.pyramid_level
+        self._cs_mgr.apply_metadata(result.metadata, result.issues)
+
+        has_axis_aips = bool(
+            result.slice_paths_xz or result.slice_paths_yz or result.pair_paths_xz or result.pair_paths_yz
+        )
+        self._btn_mode_z.setEnabled(has_axis_aips)
+        if has_axis_aips:
+            self._btn_mode_z.setToolTip("Depth alignment: adjust Z-overlap offsets, view XZ/YZ cross-sections")
+
+        warnings = [issue.message for issue in result.issues if issue.severity == SEVERITY_WARNING]
+        if warnings:
+            self.server_status_label.setText(base_status + "\n" + "\n".join(warnings))
+        else:
+            self.server_status_label.setText(base_status)
 
     def _get_automated_state(self: ManualAlignWidget, mid: int) -> AlignmentState:
         """Return the best available initial AlignmentState for *mid*.

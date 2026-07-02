@@ -1,0 +1,42 @@
+{
+  "step_name": "pairwise_registration",
+  "output_path": "tests/fixtures/manual_align_package/transforms/slice_z02",
+  "source": "automated",
+  "metrics": {
+    "translation_x": {
+      "value": 1.5,
+      "unit": "pixels"
+    },
+    "translation_y": {
+      "value": -2.5,
+      "unit": "pixels"
+    },
+    "translation_magnitude": {
+      "value": 2.9154759474226504,
+      "unit": "pixels"
+    },
+    "rotation": {
+      "value": -0.25,
+      "unit": "degrees"
+    },
+    "registration_confidence": {
+      "value": 1.0
+    },
+    "z_correlation": {
+      "value": 1.0
+    },
+    "registration_error": {
+      "value": 0.0
+    }
+  },
+  "overall_status": "ok",
+  "manual_alignment": {
+    "pyramid_level": 0,
+    "working_tx": -1.5,
+    "working_ty": 2.5,
+    "center_working": [
+      64.0,
+      64.0
+    ]
+  }
+}

@@ -720,6 +720,18 @@ class _ButtonStub:
         self.enabled = enabled
 
 
+class _BtnModeZ:
+    def __init__(self) -> None:
+        self.enabled = False
+        self.tooltip = ""
+
+    def setEnabled(self, enabled: bool) -> None:
+        self.enabled = enabled
+
+    def setToolTip(self, tooltip: str) -> None:
+        self.tooltip = tooltip
+
+
 class _ProgressStub:
     def __init__(self) -> None:
         self.shown = False
@@ -1566,6 +1578,7 @@ def _make_session_confidence_widget(
     widget._saved_flash_mid = None
     widget._saved_flash_timer = MagicMock()
     widget._cs_mgr = MagicMock(interpolated_slice_ids=set())
+    widget._btn_mode_z = _BtnModeZ()
     widget.resume_block = _ResumeBlockStub()
     widget._current_state = lambda: AlignmentState(tx=0.0, ty=0.0, rotation=0.0)
     return widget
@@ -1784,22 +1797,8 @@ class TestSessionConfidence:
         local_dir = tmp_path / "server_package"
         aips = local_dir / "manual_align_package" / "aips"
         aips.mkdir(parents=True)
-        (aips / "slice_000.npz").touch()
+        (aips / "slice_z00.npz").touch()
 
-        monkeypatch.setattr(
-            widget_server_module,
-            "discover_aips",
-            lambda _path: {0: aips / "slice_000.npz"},
-            raising=False,
-        )
-        monkeypatch.setattr(
-            widget_server_module,
-            "discover_pair_aips",
-            lambda _path: {(0, 1): (aips / "slice_000.npz", aips / "slice_000.npz")},
-            raising=False,
-        )
-        monkeypatch.setattr(widget, "_discover_axis_aip_dirs", lambda _root: None)
-        widget._apply_package_metadata = lambda _root, _base: None
         monkeypatch.setattr(widget, "_rebuild_pairs", lambda: None)
 
         widget._on_download_finished(True, "Download complete", local_dir)
@@ -1821,22 +1820,8 @@ class TestSessionConfidence:
 
         aips = tmp_path / "manual_align_package" / "aips"
         aips.mkdir(parents=True)
-        (aips / "slice_000.npz").touch()
+        (aips / "slice_z00.npz").touch()
 
-        monkeypatch.setattr(
-            widget_server_module,
-            "discover_aips",
-            lambda _path: {0: aips / "slice_000.npz"},
-            raising=False,
-        )
-        monkeypatch.setattr(
-            widget_server_module,
-            "discover_pair_aips",
-            lambda _path: {(0, 1): (aips / "slice_000.npz", aips / "slice_000.npz")},
-            raising=False,
-        )
-        monkeypatch.setattr(widget, "_discover_axis_aip_dirs", lambda _root: None)
-        widget._apply_package_metadata = lambda _root, _base: None
         monkeypatch.setattr(widget, "_rebuild_pairs", lambda: None)
 
         widget._load_existing_package(aips)
@@ -1866,37 +1851,40 @@ def _make_package_metadata_widget(
     *,
     level: int = 2,
     pairs: list[tuple[int, int]] | None = None,
-) -> ServerMixin:
-    """Minimal ServerMixin widget for package metadata wiring tests."""
+):
+    """Minimal ServerMixin + PairLoadingMixin widget for package ingest wiring tests."""
     from linumpy_manual_align.remote.cross_section import CrossSectionManager
+    from linumpy_manual_align.ui.widget_pair_loading import PairLoadingMixin
 
-    widget = object.__new__(ServerMixin)
+    class _PackageMetadataWidget(ServerMixin, PairLoadingMixin):
+        pass
+
+    widget = object.__new__(_PackageMetadataWidget)
     widget.output_dir = tmp_path
     widget.pairs = pairs or [(0, 1)]
     widget.level = level
     widget.server_status_label = _StatusLabel()
     widget.viewer = _Viewer()
     widget._cs_mgr = CrossSectionManager()
+    widget._btn_mode_z = _BtnModeZ()
     widget.saved_pairs = set()
     widget.slice_ids = []
     widget.existing_transforms = {}
+    widget.aips_dir = None
+    widget.slice_paths = {}
+    widget.pair_paths_xy = {}
+    widget.aips_xz_dir = None
+    widget.aips_yz_dir = None
+    widget.slice_paths_xz = {}
+    widget.slice_paths_yz = {}
+    widget.pair_paths_xz = {}
+    widget.pair_paths_yz = {}
+    widget.transforms_dir = None
     return widget
 
 
-def _patch_package_discovery(monkeypatch: pytest.MonkeyPatch, widget: ServerMixin, aips: Path) -> None:
-    monkeypatch.setattr(
-        widget_server_module,
-        "discover_aips",
-        lambda _path: {0: aips / "slice_000.npz"},
-        raising=False,
-    )
-    monkeypatch.setattr(
-        widget_server_module,
-        "discover_pair_aips",
-        lambda _path: {(0, 1): (aips / "slice_000.npz", aips / "slice_000.npz")},
-        raising=False,
-    )
-    widget._discover_axis_aip_dirs = lambda _root: None
+def _patch_package_discovery(monkeypatch: pytest.MonkeyPatch, widget, aips: Path) -> None:
+    del monkeypatch, aips
     widget._refresh_saved_pairs = lambda: None
     widget._rebuild_pairs = lambda: None
     widget._refresh_session_state = lambda: None
@@ -1911,7 +1899,7 @@ class TestPackageMetadataWiring:
         widget = _make_package_metadata_widget(tmp_path, level=2)
         aips = tmp_path / "manual_align_package" / "aips"
         aips.mkdir(parents=True)
-        (aips / "slice_000.npz").touch()
+        (aips / "slice_z00.npz").touch()
         (aips.parent / METADATA_FILENAME).write_text(json.dumps({"pyramid_level": 5}))
         _patch_package_discovery(monkeypatch, widget, aips)
 
@@ -1925,7 +1913,7 @@ class TestPackageMetadataWiring:
         widget = _make_package_metadata_widget(tmp_path, level=2)
         aips = tmp_path / "manual_align_package" / "aips"
         aips.mkdir(parents=True)
-        (aips / "slice_000.npz").touch()
+        (aips / "slice_z00.npz").touch()
         _patch_package_discovery(monkeypatch, widget, aips)
 
         widget._load_existing_package(aips, base_status="Package loaded")
@@ -1938,7 +1926,7 @@ class TestPackageMetadataWiring:
         widget = _make_package_metadata_widget(tmp_path, level=2)
         aips = tmp_path / "manual_align_package" / "aips"
         aips.mkdir(parents=True)
-        (aips / "slice_000.npz").touch()
+        (aips / "slice_z00.npz").touch()
         (aips.parent / METADATA_FILENAME).write_text(
             json.dumps({"slices_remote_dir": "/remote/slices"})
         )
@@ -1954,7 +1942,7 @@ class TestPackageMetadataWiring:
         widget = _make_package_metadata_widget(tmp_path)
         aips = tmp_path / "manual_align_package" / "aips"
         aips.mkdir(parents=True)
-        (aips / "slice_000.npz").touch()
+        (aips / "slice_z00.npz").touch()
         base = "Existing package loaded"
         _patch_package_discovery(monkeypatch, widget, aips)
 
@@ -1971,7 +1959,7 @@ class TestPackageMetadataWiring:
         widget = _make_package_metadata_widget(tmp_path)
         aips = tmp_path / "manual_align_package" / "aips"
         aips.mkdir(parents=True)
-        (aips / "slice_000.npz").touch()
+        (aips / "slice_z00.npz").touch()
         (aips.parent / METADATA_FILENAME).write_text("{ not valid json")
         _patch_package_discovery(monkeypatch, widget, aips)
 
@@ -1993,7 +1981,7 @@ class TestPackageMetadataWiring:
         local_dir = tmp_path / "server_package"
         aips = local_dir / "manual_align_package" / "aips"
         aips.mkdir(parents=True)
-        (aips / "slice_000.npz").touch()
+        (aips / "slice_z00.npz").touch()
         _patch_package_discovery(monkeypatch, widget, aips)
 
         base = "Download complete"
@@ -2009,7 +1997,7 @@ class TestPackageMetadataWiring:
         widget = _make_package_metadata_widget(tmp_path)
         aips = tmp_path / "manual_align_package" / "aips"
         aips.mkdir(parents=True)
-        (aips / "slice_000.npz").touch()
+        (aips / "slice_z00.npz").touch()
         (aips.parent / METADATA_FILENAME).write_text(json.dumps({"pyramid_level": 1}))
         _patch_package_discovery(monkeypatch, widget, aips)
 
@@ -2042,7 +2030,7 @@ class TestStartupMetadataWarnings:
         output_dir.mkdir(parents=True)
         aips = tmp_path / "sub" / "server_package" / "manual_align_package" / "aips"
         aips.mkdir(parents=True)
-        (aips / "slice_000.npz").touch()
+        (aips / "slice_z00.npz").touch()
 
         widget = ManualAlignWidget.__new__(ManualAlignWidget)
         widget.output_dir = output_dir
@@ -2052,6 +2040,7 @@ class TestStartupMetadataWarnings:
         widget.server_status_label = _StatusLabel()
         widget.viewer = _Viewer()
         widget._cs_mgr = CrossSectionManager()
+        widget._btn_mode_z = _BtnModeZ()
         widget.saved_pairs = set()
         widget.existing_transforms = {}
         _patch_package_discovery(monkeypatch, widget, aips)

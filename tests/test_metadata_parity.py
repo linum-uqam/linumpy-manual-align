@@ -1,4 +1,4 @@
-"""CONT-08: normalization parity across CLI, CrossSectionManager, and widget_server."""
+"""CONT-08: normalization parity across CLI, CrossSectionManager, and widget ingest apply."""
 
 from __future__ import annotations
 
@@ -10,7 +10,9 @@ from linumpy_manual_align.__main__ import resolve_package_level
 from linumpy_manual_align.contracts.layout import METADATA_FILENAME
 from linumpy_manual_align.contracts.metadata import load_manual_align_metadata
 from linumpy_manual_align.contracts.models import SEVERITY_WARNING
+from linumpy_manual_align.io.package_ingest import ingest_manual_align_package
 from linumpy_manual_align.remote.cross_section import CrossSectionManager
+from linumpy_manual_align.ui.widget_pair_loading import PairLoadingMixin
 from linumpy_manual_align.ui.widget_server import ServerMixin
 
 FIXTURE_CASES = ("golden", "missing", "invalid_json")
@@ -22,6 +24,18 @@ class _StatusLabel:
 
     def setText(self, text: str) -> None:
         self.text = text
+
+
+class _BtnModeZ:
+    def __init__(self) -> None:
+        self.enabled = False
+        self.tooltip = ""
+
+    def setEnabled(self, enabled: bool) -> None:
+        self.enabled = enabled
+
+    def setToolTip(self, tooltip: str) -> None:
+        self.tooltip = tooltip
 
 
 def _issue_tuples(issues) -> list[tuple]:
@@ -51,11 +65,28 @@ def _materialize_fixture(
     raise ValueError(f"unknown fixture case: {case_name}")
 
 
-def _make_widget(*, level: int = 42) -> ServerMixin:
-    widget = object.__new__(ServerMixin)
+class _WidgetStub(ServerMixin, PairLoadingMixin):
+    """Minimal stack for _apply_package_ingest parity tests."""
+
+
+def _make_widget(*, level: int = 42) -> _WidgetStub:
+    widget = object.__new__(_WidgetStub)
     widget.level = level
     widget.server_status_label = _StatusLabel()
     widget._cs_mgr = CrossSectionManager()
+    widget._btn_mode_z = _BtnModeZ()
+    widget.aips_dir = None
+    widget.slice_paths = {}
+    widget.slice_ids = []
+    widget.pair_paths_xy = {}
+    widget.aips_xz_dir = None
+    widget.aips_yz_dir = None
+    widget.slice_paths_xz = {}
+    widget.slice_paths_yz = {}
+    widget.pair_paths_xz = {}
+    widget.pair_paths_yz = {}
+    widget.transforms_dir = None
+    widget.existing_transforms = {}
     return widget
 
 
@@ -86,14 +117,15 @@ def test_cli_and_manager_parity(
 def test_widget_hook_parity(
     case_name: str, tmp_path: Path, copy_fixture_tree, qapp
 ) -> None:
-    """widget_server._apply_package_metadata matches CLI gating and warning surfacing."""
+    """PairLoadingMixin._apply_package_ingest matches CLI gating and warning surfacing."""
     pkg_root = _materialize_fixture(case_name, tmp_path, copy_fixture_tree)
     canonical_norm, canonical_issues = load_manual_align_metadata(pkg_root)
     starting_level = 42
     base_status = "base"
     widget = _make_widget(level=starting_level)
+    ingest_result = ingest_manual_align_package(pkg_root)
 
-    widget._apply_package_metadata(pkg_root, base_status)
+    widget._apply_package_ingest(ingest_result, base_status=base_status)
 
     cli_level = resolve_package_level(pkg_root)
     if canonical_norm.pyramid_level_explicit:

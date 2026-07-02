@@ -32,9 +32,8 @@ from linumpy_manual_align.io.image_utils import (
     ENHANCE_NONE,
     OVERLAY_COLOR,
 )
+from linumpy_manual_align.io.package_ingest import ingest_manual_align_package
 from linumpy_manual_align.io.transform_io import (
-    discover_aips,
-    discover_pair_aips,
     discover_slices,
     discover_transforms,
 )
@@ -101,26 +100,51 @@ class ManualAlignWidget(
         self.aips_xz_dir = Path(aips_xz_dir) if aips_xz_dir else None
         self.aips_yz_dir = Path(aips_yz_dir) if aips_yz_dir else None
         self.server_config = server_config
+        self._cli_package_ingest = None
 
         if self.aips_dir is not None:
-            self.slice_paths = discover_aips(self.aips_dir)
+            ingest_result = ingest_manual_align_package(self.aips_dir)
+            self._cli_package_ingest = ingest_result
+            if ingest_result.aips_dir is not None:
+                self.aips_dir = ingest_result.aips_dir
+                self.slice_paths = ingest_result.slice_paths
+                self.aips_xz_dir = ingest_result.aips_xz_dir
+                self.aips_yz_dir = ingest_result.aips_yz_dir
+                self.slice_paths_xz = ingest_result.slice_paths_xz
+                self.slice_paths_yz = ingest_result.slice_paths_yz
+                self.pair_paths_xz = ingest_result.pair_paths_xz
+                self.pair_paths_yz = ingest_result.pair_paths_yz
+                self.pair_paths_xy = ingest_result.pair_paths_xy
+                if ingest_result.transforms_dir is not None:
+                    self.transforms_dir = ingest_result.transforms_dir
+                    self.existing_transforms = ingest_result.existing_transforms
+            else:
+                self.slice_paths = {}
+                self.slice_paths_xz = {}
+                self.slice_paths_yz = {}
+                self.pair_paths_xz = {}
+                self.pair_paths_yz = {}
+                self.pair_paths_xy = {}
         elif self.input_dir is not None:
             self.slice_paths = discover_slices(self.input_dir)
+            self.slice_paths_xz = {}
+            self.slice_paths_yz = {}
+            self.pair_paths_xz = {}
+            self.pair_paths_yz = {}
+            self.pair_paths_xy = {}
         else:
             self.slice_paths = {}
-
-        self.slice_paths_xz = discover_aips(self.aips_xz_dir) if self.aips_xz_dir else {}
-        self.slice_paths_yz = discover_aips(self.aips_yz_dir) if self.aips_yz_dir else {}
-        self.pair_paths_xz: dict[tuple[int, int], dict[str, Path]] = (
-            discover_pair_aips(self.aips_xz_dir) if self.aips_xz_dir else {}
-        )
-        self.pair_paths_yz: dict[tuple[int, int], dict[str, Path]] = (
-            discover_pair_aips(self.aips_yz_dir) if self.aips_yz_dir else {}
-        )
-        self.pair_paths_xy: dict[tuple[int, int], dict[str, Path]] = discover_pair_aips(self.aips_dir) if self.aips_dir else {}
+            self.slice_paths_xz = {}
+            self.slice_paths_yz = {}
+            self.pair_paths_xz = {}
+            self.pair_paths_yz = {}
+            self.pair_paths_xy = {}
 
         self.slice_ids = list(self.slice_paths.keys())
-        self.existing_transforms = discover_transforms(self.transforms_dir) if self.transforms_dir else {}
+        if self.aips_dir is None and self.transforms_dir is not None:
+            self.existing_transforms = discover_transforms(self.transforms_dir)
+        elif self.aips_dir is None:
+            self.existing_transforms = {}
         self._filter_slices = filter_slices
 
         self.pairs: list[tuple[int, int]] = []
@@ -180,6 +204,9 @@ class ManualAlignWidget(
         self._host_persist_timer.timeout.connect(self._persist_server_host)
 
         build_manual_align_ui(self)
+        if self._cli_package_ingest is not None:
+            self._apply_package_ingest(self._cli_package_ingest, base_status="")
+            self._cli_package_ingest = None
         self._sync_server_config_host_from_ui()
         self._install_keybindings()
         self._install_close_guard()
