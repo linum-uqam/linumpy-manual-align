@@ -26,7 +26,7 @@ from qtpy.QtCore import QSettings as _QSettings
 # Keys are grouped by "/" prefix and match the QSettings key hierarchy.
 # ---------------------------------------------------------------------------
 
-DEFAULTS: dict[str, int | float | str] = {
+DEFAULTS: dict[str, int | float | str | bool] = {
     # Keyboard shortcut step sizes
     "shortcuts/translate_fine_px": 1,
     "shortcuts/translate_coarse_px": 10,
@@ -50,6 +50,11 @@ DEFAULTS: dict[str, int | float | str] = {
     "server/remote_python": "",
     # Base path for remote workspaces, e.g. /scratch or /scratch_nvme
     "server/remote_workspace_base": "/scratch",
+    # Panel collapse state (D-10)
+    "ui/panel/server_expanded": True,
+    "ui/panel/display_expanded": True,
+    "ui/panel/shortcuts_expanded": False,
+    "ui/panel/pair_detail_expanded": True,
 }
 
 
@@ -77,7 +82,7 @@ class AppSettings(QObject):
     # Public API
     # ------------------------------------------------------------------
 
-    def get(self, key: str) -> int | float | str:
+    def get(self, key: str) -> int | float | str | bool:
         """Return the stored value for *key*, or the default if not set.
 
         The return type is coerced to match :data:`DEFAULTS`; if *key* is
@@ -87,15 +92,27 @@ class AppSettings(QObject):
         raw = self._qs.value(key, default)
         if raw is None:
             raw = default
+        if isinstance(default, bool):
+            if isinstance(raw, bool):
+                return raw
+            if isinstance(raw, str):
+                return raw.lower() not in ("false", "0", "")
+            return bool(raw)
         return type(default)(raw)  # type: ignore[call-arg]
 
-    def set(self, key: str, value: int | float | str) -> None:
+    def set(self, key: str, value: int | float | str | bool) -> None:
         """Write *value* for *key* and emit :attr:`changed`."""
         if key not in DEFAULTS:
             raise KeyError(f"Unknown settings key: {key!r}")
         self._qs.setValue(key, value)
         self._qs.sync()
         self.changed.emit(key, value)
+
+    def is_set(self, key: str) -> bool:
+        """Return whether *key* has an explicit stored override."""
+        if key not in DEFAULTS:
+            raise KeyError(f"Unknown settings key: {key!r}")
+        return self._qs.contains(key)
 
     def reset(self, key: str) -> None:
         """Remove the stored override for *key* (next :meth:`get` returns default)."""

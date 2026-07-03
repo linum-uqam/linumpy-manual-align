@@ -7,6 +7,7 @@ from pathlib import Path
 from qtpy.QtWidgets import QFileDialog, QMessageBox
 
 from linumpy_manual_align.contracts import UploadReadinessReport, assess_upload_readiness, moving_ids_from_slice_dirs
+from linumpy_manual_align.contracts.models import SEVERITY_ERROR, SEVERITY_INFO
 from linumpy_manual_align.io.package_ingest import find_downloaded_package, ingest_manual_align_package
 from linumpy_manual_align.remote import ScpWorker
 from linumpy_manual_align.settings import settings
@@ -20,6 +21,14 @@ from linumpy_manual_align.ui.widget_typing import ManualAlignWidget
 
 class ServerMixin:
     """Mixin that handles server download/upload and configuration UI interactions."""
+
+    def _sync_server_header_summary(self: ManualAlignWidget) -> None:
+        if hasattr(self, "_server_section"):
+            self._server_section.refresh_summary()
+
+    def _set_server_status(self: ManualAlignWidget, text: str) -> None:
+        self.server_status_label.setText(text)
+        self._sync_server_header_summary()
 
     def _download_from_server(self: ManualAlignWidget) -> None:
         """Download the manual alignment data package from the server (in background thread)."""
@@ -35,7 +44,7 @@ class ServerMixin:
         self.btn_download.setEnabled(False)
         self.btn_upload.setEnabled(False)
         self.server_progress.show()
-        self.server_status_label.setText("<i>Downloading...</i>")
+        self._set_server_status("<i>Downloading...</i>")
         self.viewer.status = "Downloading data from server..."
 
         # Always download to the same fixed root so repeated downloads overwrite
@@ -51,7 +60,7 @@ class ServerMixin:
     def _on_download_finished(self: ManualAlignWidget, ok: bool, msg: str, local_dir: Path) -> None:
         """Handle completion of background download."""
         self.server_progress.hide()
-        self.server_status_label.setText(msg)
+        self._set_server_status(msg)
         self.viewer.status = msg
         self.btn_download.setEnabled(True)
         self.btn_upload.setEnabled(True)
@@ -114,16 +123,21 @@ class ServerMixin:
         remote_dest = f"{self.server_config.host}:{self.server_config.remote_output}/manual_transforms/"
 
         if report.has_blocking_errors:
-            self.server_status_label.setText(
-                f"Upload blocked: {report.summary_line()} — fix errors and retry"
-            )
+            blocked_status = f"Upload blocked: {report.summary_line()} — fix errors and retry"
+            self._set_server_status(blocked_status)
+            if hasattr(self, "_set_promoted_message"):
+                self._set_promoted_message(
+                    blocked_status,
+                    severity=SEVERITY_ERROR,
+                    source="upload_blocked",
+                )
             body = self._format_blocked_upload_body(report)
             error_lines = report.error_lines()
             self.viewer.status = error_lines[0] if error_lines else report.summary_line()
             QMessageBox.critical(self, "Upload blocked", body)
             return
 
-        self.server_status_label.setText(report.summary_line())
+        self._set_server_status(report.summary_line())
         if not self._confirm_upload_dialog(report, remote_dest):
             return
 
@@ -132,7 +146,7 @@ class ServerMixin:
         self.btn_download.setEnabled(False)
         self.btn_upload.setEnabled(False)
         self.server_progress.show()
-        self.server_status_label.setText("<i>Uploading...</i>")
+        self._set_server_status("<i>Uploading...</i>")
         self.viewer.status = "Uploading transforms to server..."
 
         self._worker = ScpWorker(
@@ -146,7 +160,7 @@ class ServerMixin:
     def _on_upload_finished(self: ManualAlignWidget, ok: bool, msg: str) -> None:
         """Handle completion of background upload."""
         self.server_progress.hide()
-        self.server_status_label.setText(msg)
+        self._set_server_status(msg)
         self.viewer.status = msg
         self.btn_download.setEnabled(True)
         self.btn_upload.setEnabled(True)
@@ -154,6 +168,10 @@ class ServerMixin:
 
         pending_mids = getattr(self, "_pending_upload_mids", None)
         if ok and pending_mids is not None and hasattr(self, "uploaded_pairs"):
+            if hasattr(self, "_set_promoted_message"):
+                self._set_promoted_message(
+                    None, severity=SEVERITY_ERROR, source="upload_blocked"
+                )
             self.uploaded_pairs = set(pending_mids)
             if self.server_config is not None:
                 remote_base = str(settings.get("server/remote_workspace_base"))
@@ -163,10 +181,14 @@ class ServerMixin:
                 path = f"{self.server_config.remote_output}/manual_transforms"
                 escaped = path.replace("'", "\\'")
                 config_line = f"params.manual_transforms_dir = '{escaped}'"
+                guidance = "Re-run the pipeline from stack with -resume."
                 if hasattr(self, "_show_resume_block"):
-                    self._show_resume_block(
-                        config_line,
-                        "Re-run the pipeline from stack with -resume.",
+                    self._show_resume_block(config_line, guidance)
+                if hasattr(self, "_set_promoted_message"):
+                    self._set_promoted_message(
+                        f"{config_line}\n{guidance}",
+                        severity=SEVERITY_INFO,
+                        source="resume_promotion",
                     )
             self._pending_upload_mids = None
             if hasattr(self, "_refresh_session_state"):
@@ -224,7 +246,7 @@ class ServerMixin:
             remote_base=str(settings.get("server/remote_workspace_base")),
         )
         if cfg is None:
-            self.server_status_label.setText("<b style='color: red;'>Failed to parse config</b>")
+            self._set_server_status("<b style='color: red;'>Failed to parse config</b>")
             return
 
         self.server_config = cfg
@@ -251,7 +273,7 @@ class ServerMixin:
             )
             self._load_existing_package(existing, base_status=base_status)
         else:
-            self.server_status_label.setText(f"Configured: {cfg.subject_id} @ {cfg.host}")
+            self._set_server_status(f"Configured: {cfg.subject_id} @ {cfg.host}")
 
         if hasattr(self, "_refresh_session_state"):
             self._refresh_session_state()

@@ -15,8 +15,10 @@ import linumpy_manual_align.ui.widget_undo_save as widget_undo_save_module
 from linumpy_manual_align.__main__ import parse_args
 from linumpy_manual_align.contracts import (
     SEVERITY_ERROR,
+    SEVERITY_INFO,
     SEVERITY_WARNING,
     ContractIssue,
+    PairSessionState,
     PairUploadReadiness,
     PairUploadStatus,
     UploadReadinessReport,
@@ -36,7 +38,7 @@ from linumpy_manual_align.ui.widget_status import StatusMixin
 from linumpy_manual_align.ui.widget_undo_save import UndoSaveMixin
 
 
-class _SaveWidget(UndoSaveMixin):
+class _SaveWidget(UndoSaveMixin, StatusMixin):
     pass
 
 
@@ -61,7 +63,20 @@ class _Viewer:
         self.closed = True
 
 
-def _make_save_widget(output_dir: Path, mid: int, level: int = 1) -> _SaveWidget:
+def _attach_promoted_banner(widget, qapp=None) -> None:
+    if qapp is None:
+        return
+    from linumpy_manual_align.ui.ui_builder import build_promoted_banner
+
+    if not isinstance(widget, StatusMixin):
+        return
+    root, banner = build_promoted_banner(on_dismiss=widget._dismiss_promoted_banner)
+    widget.promoted_banner = root
+    widget.promoted_banner_label = banner.banner_label
+    widget.btn_dismiss_banner = banner.btn_dismiss
+
+
+def _make_save_widget(output_dir: Path, mid: int, level: int = 1, *, qapp=None) -> _SaveWidget:
     widget = object.__new__(_SaveWidget)
     widget.pairs = [(mid - 1, mid)]
     widget.current_pair_idx = 0
@@ -77,10 +92,11 @@ def _make_save_widget(output_dir: Path, mid: int, level: int = 1) -> _SaveWidget
     widget._flash_saved_calls: list[int] = []
     widget._current_state = lambda: AlignmentState(tx=1.0, ty=2.0, rotation=0.0)
     widget._flash_saved = lambda m: widget._flash_saved_calls.append(m)
+    _attach_promoted_banner(widget, qapp)
     return widget
 
 
-def _make_batch_widget(output_dir: Path, mids: list[int], level: int = 1) -> _SaveWidget:
+def _make_batch_widget(output_dir: Path, mids: list[int], level: int = 1, *, qapp=None) -> _SaveWidget:
     widget = object.__new__(_SaveWidget)
     widget.pairs = [(m - 1, m) for m in mids]
     widget.current_pair_idx = 0
@@ -99,6 +115,7 @@ def _make_batch_widget(output_dir: Path, mids: list[int], level: int = 1) -> _Sa
     widget._flash_saved_calls: list[int] = []
     widget._flash_saved = lambda m: widget._flash_saved_calls.append(m)
     widget._current_state = lambda: AlignmentState(tx=1.0, ty=2.0, rotation=0.0)
+    _attach_promoted_banner(widget, qapp)
     return widget
 
 
@@ -392,9 +409,9 @@ class TestSaveCurrentValidation:
         assert mid in widget.unsaved_changes
         assert widget._flash_saved_calls == []
 
-    def test_save_current_failure_status_and_modal(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_save_current_failure_status_and_modal(self, qapp, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         mid = 5
-        widget = _make_save_widget(tmp_path, mid)
+        widget = _make_save_widget(tmp_path, mid, qapp=qapp)
         out_dir = tmp_path / f"slice_z{mid:02d}"
         offsets_path = out_dir / "offsets.txt"
         issue = ContractIssue(
@@ -421,8 +438,14 @@ class TestSaveCurrentValidation:
         assert "output.missing_offsets" in message
         assert "offsets.txt is missing" in message
         assert f"z{mid:02d}" in widget.viewer.status
-        assert "offsets.txt" in widget.status_label.text
-        assert "output.missing_offsets" in widget.status_label.text
+        assert "offsets.txt" in widget.viewer.status
+        assert "output.missing_offsets" in widget.viewer.status
+        assert not widget.promoted_banner.isHidden()
+        banner_text = widget.promoted_banner_label.text()
+        assert f"z{mid:02d}" in banner_text
+        assert "offsets.txt" in banner_text
+        assert "output.missing_offsets" in banner_text
+        assert widget.status_label.text == ""
 
     def test_save_current_metrics_failure_blocks_saved(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         mid = 5
@@ -776,8 +799,12 @@ def _make_upload_widget(
         subject_id="sub-22",
         remote_output="/scratch/workspace/sub-22/output",
     ),
+    qapp=None,
 ) -> ServerMixin:
-    widget = object.__new__(ServerMixin)
+    class _UploadWidget(ServerMixin, StatusMixin):
+        pass
+
+    widget = object.__new__(_UploadWidget)
     widget.server_config = server_config
     widget.output_dir = tmp_path
     widget.pairs = pairs
@@ -788,6 +815,7 @@ def _make_upload_widget(
     widget.btn_upload = _ButtonStub()
     widget.server_progress = _ProgressStub()
     widget._worker = None
+    _attach_promoted_banner(widget, qapp)
     return widget
 
 
@@ -820,7 +848,7 @@ def _patch_upload_settings(monkeypatch: pytest.MonkeyPatch) -> None:
 
 class TestUploadGate:
     def test_upload_blocked_shows_critical(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, qapp, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         issue1 = ContractIssue(
             severity=SEVERITY_ERROR,
@@ -845,7 +873,7 @@ class TestUploadGate:
             invalid_count=1,
             pairs=(pair,),
         )
-        widget = _make_upload_widget(tmp_path, [(0, 1)], {1})
+        widget = _make_upload_widget(tmp_path, [(0, 1)], {1}, qapp=qapp)
         _patch_upload_settings(monkeypatch)
         monkeypatch.setattr(
             widget_server_module,
@@ -878,6 +906,8 @@ class TestUploadGate:
         for line in report.error_lines():
             assert line in body
         assert widget.server_status_label.text.startswith("Upload blocked:")
+        assert not widget.promoted_banner.isHidden()
+        assert widget.promoted_banner_label.text().startswith("Upload blocked:")
         assert len(_ScpWorkerRecorder.instances) == 0
 
     def test_upload_blocked_zero_ready_message(
@@ -1304,6 +1334,7 @@ class _ComboStub:
         self.items: list[str] = list(items or [])
         self._index = 0
         self._signals_blocked = False
+        self._item_data: dict[tuple[int, int], object] = {}
 
     def count(self) -> int:
         return len(self.items)
@@ -1313,6 +1344,12 @@ class _ComboStub:
 
     def setItemText(self, i: int, text: str) -> None:
         self.items[i] = text
+
+    def setItemData(self, i: int, value: object, role: int) -> None:
+        self._item_data[(i, role)] = value
+
+    def itemData(self, i: int, role: int) -> object | None:
+        return self._item_data.get((i, role))
 
     def currentIndex(self) -> int:
         return self._index
@@ -1391,6 +1428,800 @@ def _copy_valid_slice_output(copy_fixture_tree, tmp_path: Path, mid: int) -> Pat
         shutil.rmtree(dest)
     shutil.copytree(golden_root / f"slice_z{mid:02d}", dest)
     return dest
+
+
+@pytest.fixture
+def isolated_panel_settings(qapp):
+    """Fresh in-memory QSettings for panel collapse builder tests."""
+    from linumpy_manual_align.settings import settings
+
+    settings._qs.clear()
+    yield settings
+    settings._qs.clear()
+
+
+class TestCollapsibleSection:
+    """Reusable collapsible section factory (Phase 10 plan 01, D-08/D-10/D-11/D-12)."""
+
+    def test_namespace_members(self, qapp, isolated_panel_settings) -> None:
+        from qtpy.QtCore import Qt
+        from qtpy.QtWidgets import QLabel
+
+        from linumpy_manual_align.ui.ui_builder import build_collapsible_section
+
+        content = QLabel("inner")
+        root, ns = build_collapsible_section(
+            "Server",
+            content,
+            settings_key="ui/panel/server_expanded",
+            default_expanded=True,
+        )
+
+        assert root is not None
+        assert ns.toggle is not None
+        assert ns.title_label is not None
+        assert ns.summary_label is not None
+        assert ns.content is content
+        assert callable(ns.set_expanded)
+        assert callable(ns.refresh_summary)
+
+    def test_default_expanded_shows_content_and_down_arrow(self, qapp, isolated_panel_settings) -> None:
+        from qtpy.QtCore import Qt
+        from qtpy.QtWidgets import QLabel
+
+        from linumpy_manual_align.ui.ui_builder import build_collapsible_section
+
+        content = QLabel("inner")
+        _, ns = build_collapsible_section(
+            "Display",
+            content,
+            settings_key="ui/panel/display_expanded",
+            default_expanded=True,
+        )
+
+        assert not content.isHidden()
+        assert ns.toggle.arrowType() == Qt.DownArrow
+
+    def test_default_collapsed_hides_content_and_right_arrow(self, qapp, isolated_panel_settings) -> None:
+        from qtpy.QtCore import Qt
+        from qtpy.QtWidgets import QLabel
+
+        from linumpy_manual_align.ui.ui_builder import build_collapsible_section
+
+        content = QLabel("inner")
+        _, ns = build_collapsible_section(
+            "Shortcuts",
+            content,
+            settings_key="ui/panel/shortcuts_expanded",
+            default_expanded=False,
+        )
+
+        assert content.isHidden()
+        assert ns.toggle.arrowType() == Qt.RightArrow
+
+    def test_toggle_persists_settings(self, qapp, isolated_panel_settings) -> None:
+        from qtpy.QtWidgets import QLabel
+
+        from linumpy_manual_align.settings import settings
+        from linumpy_manual_align.ui.ui_builder import build_collapsible_section
+
+        content = QLabel("inner")
+        _, ns = build_collapsible_section(
+            "Server",
+            content,
+            settings_key="ui/panel/server_expanded",
+            default_expanded=True,
+        )
+
+        assert settings.get("ui/panel/server_expanded") is True
+        ns.toggle.click()
+        assert content.isHidden()
+        assert settings.get("ui/panel/server_expanded") is False
+        ns.toggle.click()
+        assert not content.isHidden()
+        assert settings.get("ui/panel/server_expanded") is True
+
+    def test_refresh_summary_updates_collapsed_header(self, qapp, isolated_panel_settings) -> None:
+        from qtpy.QtWidgets import QLabel
+
+        from linumpy_manual_align.ui.ui_builder import build_collapsible_section
+
+        content = QLabel("inner")
+        summary_state = {"text": "first summary"}
+
+        def provider() -> str:
+            return summary_state["text"]
+
+        _, ns = build_collapsible_section(
+            "Server",
+            content,
+            settings_key="ui/panel/server_expanded",
+            default_expanded=False,
+            summary_provider=provider,
+        )
+
+        ns.refresh_summary()
+        assert ns.summary_label.text() == "first summary"
+
+        summary_state["text"] = "updated summary"
+        ns.refresh_summary()
+        assert ns.summary_label.text() == "updated summary"
+
+    def test_refresh_summary_empty_when_expanded(self, qapp, isolated_panel_settings) -> None:
+        from qtpy.QtWidgets import QLabel
+
+        from linumpy_manual_align.ui.ui_builder import build_collapsible_section
+
+        content = QLabel("inner")
+        _, ns = build_collapsible_section(
+            "Display",
+            content,
+            settings_key="ui/panel/display_expanded",
+            default_expanded=True,
+            summary_provider=lambda: "should not show",
+        )
+
+        ns.refresh_summary()
+        assert ns.summary_label.text() == ""
+
+
+class TestActionsRowBuild:
+    """Actions row factory (Phase 10 plan 01, D-02/D-03/D-25)."""
+
+    def test_returns_buttons_and_fires_callbacks(self, qapp) -> None:
+        from linumpy_manual_align.ui.ui_builder import build_actions_row
+
+        calls: list[str] = []
+        row, ns = build_actions_row(
+            on_save=lambda: calls.append("save"),
+            on_save_all=lambda: calls.append("save_all"),
+            on_upload=lambda: calls.append("upload"),
+        )
+
+        assert row is not None
+        assert ns.btn_save is not None
+        assert ns.btn_save_all is not None
+        assert ns.btn_upload is not None
+        assert ns.btn_save.text() == "Save Current (S)"
+        assert ns.btn_save_all.text() == "Save All && Exit"
+        assert "Upload Transforms" in ns.btn_upload.text()
+
+        ns.btn_save.click()
+        ns.btn_save_all.click()
+        ns.btn_upload.click()
+        assert calls == ["save", "save_all", "upload"]
+
+
+class TestPromotedBannerBuild:
+    """Promoted banner factory (Phase 10 plan 01, D-22)."""
+
+    def test_returns_hidden_banner_with_dismiss(self, qapp) -> None:
+        from linumpy_manual_align.ui.ui_builder import build_promoted_banner
+
+        dismissed: list[bool] = []
+        root, ns = build_promoted_banner(on_dismiss=lambda: dismissed.append(True))
+
+        assert root.isHidden()
+        assert ns.banner_label is not None
+        assert ns.btn_dismiss is not None
+        assert ns.btn_dismiss.isHidden()
+
+        ns.btn_dismiss.show()
+        ns.btn_dismiss.click()
+        assert dismissed == [True]
+
+
+class TestServerGroupBuild:
+    """Server group no longer exposes upload (Phase 10 plan 01, D-03)."""
+
+    def test_build_server_group_without_upload(self, qapp) -> None:
+        from linumpy_manual_align.ui.ui_builder import build_server_group
+
+        group, ns = build_server_group(
+            server_config=None,
+            on_browse=lambda: None,
+            on_host_changed=lambda _t: None,
+            on_remote_python_changed=lambda: None,
+            on_download=lambda: None,
+        )
+
+        assert group.title() == "Server"
+        assert ns.config_path_edit is not None
+        assert ns.btn_browse_config is not None
+        assert ns.host_edit is not None
+        assert ns.remote_python_edit is not None
+        assert ns.btn_download is not None
+        assert ns.server_progress is not None
+        assert ns.server_status_label is not None
+        assert not hasattr(ns, "btn_upload")
+
+
+class TestSessionGroupModeSlot:
+    """Session group accepts optional mode row (Phase 10 plan 01, D-04)."""
+
+    def test_mode_row_embedded_when_provided(self, qapp) -> None:
+        from qtpy.QtWidgets import QLabel
+
+        from linumpy_manual_align.ui.ui_builder import build_session_group
+
+        mode_widget = QLabel("mode-row")
+        group, ns = build_session_group(
+            on_copy_config=lambda: None,
+            on_dismiss_resume=lambda: None,
+            mode_row=mode_widget,
+        )
+
+        assert group is not None
+        assert mode_widget.parent() is not None
+        assert group.isAncestorOf(mode_widget)
+
+
+class TestPanelSettings:
+    """Panel collapse QSettings keys (Phase 10 plan 01, D-09/D-10)."""
+
+    @pytest.mark.parametrize(
+        "key",
+        [
+            "ui/panel/server_expanded",
+            "ui/panel/display_expanded",
+            "ui/panel/shortcuts_expanded",
+            "ui/panel/pair_detail_expanded",
+        ],
+    )
+    def test_bool_round_trip(self, qapp, isolated_panel_settings, key: str) -> None:
+        from linumpy_manual_align.settings import settings
+
+        settings.set(key, True)
+        assert settings.get(key) is True
+        settings.set(key, False)
+        assert settings.get(key) is False
+
+    def test_is_set_reports_override_presence(self, qapp, isolated_panel_settings) -> None:
+        from linumpy_manual_align.settings import settings
+
+        key = "ui/panel/server_expanded"
+        assert settings.is_set(key) is False
+        settings.set(key, False)
+        assert settings.is_set(key) is True
+        assert settings.get(key) is False
+
+    def test_bool_coercion_from_string_false(self, qapp, isolated_panel_settings) -> None:
+        from linumpy_manual_align.settings import settings
+
+        key = "ui/panel/display_expanded"
+        settings._qs.setValue(key, "false")
+        assert settings.get(key) is False
+
+
+def _make_build_ui_widget(
+    tmp_path: Path,
+    *,
+    pairs: list[tuple[int, int]] | None = None,
+    server_config: object | None = None,
+    existing_transforms: dict[int, Path] | None = None,
+):
+    """Minimal widget with enough mixin stubs to run ``build_manual_align_ui``."""
+    from qtpy.QtWidgets import QWidget
+
+    from linumpy_manual_align.ui.widget_build import build_manual_align_ui
+    from linumpy_manual_align.ui.widget_mixins import PairNavigationMixin
+    from linumpy_manual_align.ui.widget_session import SessionMixin
+    from linumpy_manual_align.ui.widget_settings_ui import SettingsUiMixin
+    from linumpy_manual_align.ui.widget_ui import UiHelpersMixin
+    from linumpy_manual_align.ui.widget_undo_save import UndoSaveMixin
+
+    class _BuildUiWidget(
+        SettingsUiMixin,
+        SessionMixin,
+        UiHelpersMixin,
+        UndoSaveMixin,
+        StatusMixin,
+        PairNavigationMixin,
+        QWidget,
+    ):
+        pass
+
+    widget = _BuildUiWidget()
+    resolved_pairs = pairs if pairs is not None else [(0, 1)]
+    widget.pairs = resolved_pairs
+    widget.current_pair_idx = 0
+    widget.server_config = server_config
+    widget.existing_transforms = existing_transforms or {}
+    widget.output_dir = tmp_path
+    widget.slice_paths_xz = {}
+    widget.slice_paths_yz = {}
+    widget.pair_paths_xz = {}
+    widget.pair_paths_yz = {}
+    widget.saved_pairs = set()
+    widget.unsaved_changes = set()
+    widget.uploaded_pairs = set()
+    widget._session_states = {}
+    widget._resume_config_line = ""
+    widget.level = 1
+    widget._current_offsets = {mid: (0, 0) for _fid, mid in resolved_pairs}
+    widget._projection_mode = "xy"
+    widget._saved_flash_mid = None
+    widget.viewer = _Viewer()
+
+    widget._prev_pair = lambda: None
+    widget._next_pair = lambda: None
+    widget._on_pair_changed = lambda _i: None
+    widget._open_settings_dialog = lambda: None
+    widget._on_mode_btn_toggled = lambda _m, _c: None
+    widget._copy_config_line = lambda: None
+    widget._dismiss_resume = lambda: None
+    widget._on_spinbox_changed = lambda: None
+    widget._on_rotation_changed = lambda _v: None
+    widget._on_rotation_slider_changed = lambda _v: None
+    widget._load_automated_transform = lambda: None
+    widget._reset_transform = lambda: None
+    widget._undo = lambda: None
+    widget._redo = lambda: None
+    widget._save_current = lambda: None
+    widget._save_all_and_exit = lambda: None
+    widget._upload_calls: list[bool] = []
+    widget._upload_to_server = lambda: widget._upload_calls.append(True)
+    widget._browse_server_config = lambda: None
+    widget._on_host_changed = lambda _t: None
+    widget._persist_remote_python = lambda: None
+    widget._download_from_server = lambda: None
+    widget._persist_server_host = lambda: None
+    widget._on_overlay_mode_changed = lambda _i: None
+    widget._on_enhance_changed = lambda _i: None
+    widget._on_tile_size_changed = lambda _v: None
+    widget._on_z_proj_changed = lambda _i: None
+    widget._on_z_offset_changed = lambda _v: None
+    widget._on_saved_flash_timeout = lambda: None
+    widget._on_cs_slider_settled = lambda: None
+    widget._current_state = lambda: AlignmentState(tx=0.0, ty=0.0, rotation=0.0)
+
+    build_manual_align_ui(widget)
+    return widget
+
+
+def _collapsible_root(section) -> object:
+    return section.toggle.parent()
+
+
+def _layout_contains_widget(layout, target) -> bool:
+    for i in range(layout.count()):
+        item = layout.itemAt(i)
+        child = item.widget()
+        child_layout = item.layout()
+        if child is target:
+            return True
+        if child_layout is not None and _layout_contains_widget(child_layout, target):
+            return True
+    return False
+
+
+def _scroll_layout_section_order(widget) -> list[str]:
+    from qtpy.QtWidgets import QScrollArea
+
+    outer = widget.layout()
+    scroll = outer.itemAt(1).widget()
+    assert isinstance(scroll, QScrollArea)
+    layout = scroll.widget().layout()
+    order: list[str] = []
+    for i in range(layout.count()):
+        item = layout.itemAt(i)
+        child_widget = item.widget()
+        child_layout = item.layout()
+        if child_layout is not None:
+            if _layout_contains_widget(child_layout, widget.pair_combo):
+                order.append("nav")
+            elif _layout_contains_widget(child_layout, widget.btn_save):
+                order.append("actions")
+            else:
+                order.append("unknown_layout")
+        elif child_widget is widget.session_group:
+            order.append("session")
+        elif child_widget is widget._mode_stack:
+            order.append("alignment")
+        elif child_widget is widget.pair_identity_label:
+            order.append("identity")
+        elif child_widget is _collapsible_root(widget._server_section):
+            order.append("server")
+        elif child_widget is _collapsible_root(widget._display_section):
+            order.append("display")
+        elif child_widget is _collapsible_root(widget._pair_detail_section):
+            order.append("detail")
+        elif child_widget is _collapsible_root(widget._shortcuts_section):
+            order.append("shortcuts")
+        else:
+            order.append("unknown_widget")
+    return order
+
+
+def _make_promoted_queue_widget(qapp):
+    from qtpy.QtWidgets import QWidget
+
+    from linumpy_manual_align.ui.ui_builder import build_promoted_banner
+
+    class _PromotedQueueWidget(StatusMixin, QWidget):
+        pass
+
+    widget = _PromotedQueueWidget()
+    root, banner = build_promoted_banner(on_dismiss=widget._dismiss_promoted_banner)
+    widget.promoted_banner = root
+    widget.promoted_banner_label = banner.banner_label
+    widget.btn_dismiss_banner = banner.btn_dismiss
+    return widget
+
+
+class TestPanelLayoutOrder:
+    """D-01 scroll order and banner placement (Phase 10 plan 02)."""
+
+    def test_d01_section_order(self, qapp, tmp_path: Path) -> None:
+        widget = _make_build_ui_widget(tmp_path)
+
+        assert _scroll_layout_section_order(widget) == [
+            "nav",
+            "session",
+            "alignment",
+            "actions",
+            "server",
+            "display",
+            "identity",
+            "detail",
+            "shortcuts",
+        ]
+
+    def test_promoted_banner_outside_scroll(self, qapp, tmp_path: Path) -> None:
+        from qtpy.QtWidgets import QScrollArea
+
+        widget = _make_build_ui_widget(tmp_path)
+        outer = widget.layout()
+        banner = outer.itemAt(0).widget()
+        scroll = outer.itemAt(1).widget()
+
+        assert banner is widget.promoted_banner
+        assert isinstance(scroll, QScrollArea)
+        assert widget.promoted_banner.parent() is widget
+        assert not scroll.widget().isAncestorOf(widget.promoted_banner)
+
+    def test_actions_visible_when_server_and_display_collapsed(
+        self, qapp, tmp_path: Path
+    ) -> None:
+        widget = _make_build_ui_widget(tmp_path)
+        widget._server_section.set_expanded(False)
+        widget._display_section.set_expanded(False)
+
+        assert not widget.btn_save.isHidden()
+        assert not widget.btn_save_all.isHidden()
+        assert not widget.btn_upload.isHidden()
+        assert not widget._server_section.content.isAncestorOf(widget.btn_upload)
+
+
+class TestBuildManualAlignSignals:
+    """Critical widget refs and relocated upload wiring (Phase 10 plan 02)."""
+
+    def test_critical_attrs_exist(self, qapp, tmp_path: Path) -> None:
+        widget = _make_build_ui_widget(tmp_path)
+
+        for attr in (
+            "promoted_banner",
+            "promoted_banner_label",
+            "btn_dismiss_banner",
+            "pair_identity_label",
+            "pair_detail_label",
+            "btn_upload",
+            "btn_save",
+            "btn_save_all",
+            "server_status_label",
+            "hints_label",
+        ):
+            assert hasattr(widget, attr), attr
+        assert widget._server_section is not None
+        assert widget._display_section is not None
+        assert widget._pair_detail_section is not None
+        assert widget.status_label is widget.pair_detail_label
+
+    def test_upload_button_invokes_handler(self, qapp, tmp_path: Path) -> None:
+        widget = _make_build_ui_widget(tmp_path)
+
+        widget.btn_upload.click()
+
+        assert widget._upload_calls == [True]
+
+
+def _make_status_split_widget(
+    tmp_path: Path,
+    pairs: list[tuple[int, int]],
+    *,
+    saved_pairs: set[int] | None = None,
+    unsaved_changes: set[int] | None = None,
+    qapp=None,
+):
+    """Harness for status identity/detail split and invalid-pair banner routing."""
+    from qtpy.QtWidgets import QWidget
+
+    from linumpy_manual_align.ui.ui_builder import build_promoted_banner
+    from linumpy_manual_align.ui.widget_mixins import PairNavigationMixin
+    from linumpy_manual_align.ui.widget_session import SessionMixin
+
+    class _StatusSplitWidget(
+        SessionMixin, StatusMixin, UndoSaveMixin, PairNavigationMixin, QWidget
+    ):
+        pass
+
+    widget = _StatusSplitWidget()
+    widget.pairs = pairs
+    widget.current_pair_idx = 0
+    widget.output_dir = tmp_path
+    widget.saved_pairs = set(saved_pairs or set())
+    widget.unsaved_changes = set(unsaved_changes or set())
+    widget.uploaded_pairs = set()
+    widget.server_config = None
+    widget._session_states = {}
+    widget._resume_config_line = ""
+    widget.session_summary_label = _StatusLabel()
+    widget.pair_combo = _ComboStub(
+        [f"z{fid:02d} → z{mid:02d}" for fid, mid in pairs]
+    )
+    widget.pair_identity_label = _StatusLabel()
+    widget.pair_detail_label = _StatusLabel()
+    widget.status_label = widget.pair_detail_label
+    widget.viewer = _Viewer()
+    widget.existing_transforms = {}
+    widget.level = 1
+    widget._current_offsets = {mid: (0, 0) for _fid, mid in pairs}
+    widget._projection_mode = "xy"
+    widget._saved_flash_mid = None
+    widget._saved_flash_timer = MagicMock()
+    widget._cs_mgr = MagicMock(interpolated_slice_ids=set())
+    widget.resume_block = _ResumeBlockStub()
+    widget._current_state = lambda: AlignmentState(tx=3.0, ty=4.0, rotation=1.5)
+    root, banner = build_promoted_banner(on_dismiss=widget._dismiss_promoted_banner)
+    widget.promoted_banner = root
+    widget.promoted_banner_label = banner.banner_label
+    widget.btn_dismiss_banner = banner.btn_dismiss
+    return widget
+
+
+class TestStatusLabelSplit:
+    """Identity vs detail label split and invalid-pair banner routing (Phase 10 plan 03)."""
+
+    def test_identity_and_detail_split(self, qapp, tmp_path: Path) -> None:
+        widget = _make_status_split_widget(tmp_path, [(0, 1)])
+
+        widget._update_status()
+
+        assert "Pair 1/1" in widget.pair_identity_label.text
+        assert "z00" in widget.pair_identity_label.text
+        assert "[XY]" in widget.pair_identity_label.text
+        assert "tx=3.0" in widget.pair_detail_label.text
+        assert "Pair 1/1" not in widget.pair_detail_label.text
+
+    def test_saved_flash_on_detail_only(self, qapp, tmp_path: Path) -> None:
+        widget = _make_status_split_widget(tmp_path, [(0, 1)])
+        widget._saved_flash_mid = 1
+
+        widget._update_status()
+
+        assert "SAVED" in widget.pair_detail_label.text
+        assert "SAVED" not in widget.pair_identity_label.text
+
+    def test_empty_state_in_identity_label(self, qapp, tmp_path: Path) -> None:
+        widget = _make_status_split_widget(tmp_path, [])
+
+        widget._update_status()
+
+        assert "No data loaded" in widget.pair_identity_label.text
+        assert widget.pair_detail_label.text == ""
+
+    def test_invalid_pair_routes_to_banner_and_clears(
+        self, qapp, tmp_path: Path, copy_fixture_tree
+    ) -> None:
+        (tmp_path / "slice_z01").mkdir()
+        widget = _make_status_split_widget(tmp_path, [(0, 1)], saved_pairs={1})
+
+        widget._refresh_session_state()
+
+        assert not widget.promoted_banner.isHidden()
+        banner_text = widget.promoted_banner_label.text()
+        assert "invalid" in banner_text.lower() or "z01" in banner_text
+
+        _copy_valid_slice_output(copy_fixture_tree, tmp_path, mid=1)
+        widget._refresh_session_state()
+
+        assert widget.promoted_banner.isHidden()
+
+
+class TestSaveUploadErrorBanner:
+    """Save and upload blocking errors surface in promoted banner (Phase 10 plan 03)."""
+
+    def test_save_error_clears_on_success(self, qapp, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        mid = 5
+        widget = _make_save_widget(tmp_path, mid, qapp=qapp)
+        issue = ContractIssue(
+            severity=SEVERITY_ERROR,
+            code="output.missing_offsets",
+            message="offsets.txt is missing",
+        )
+
+        monkeypatch.setattr("linumpy_manual_align.ui.widget_undo_save.save_transform", lambda *a, **k: None)
+        monkeypatch.setattr(
+            widget_undo_save_module,
+            "validate_manual_output",
+            lambda out_dir, m: [issue],
+            raising=False,
+        )
+        monkeypatch.setattr("linumpy_manual_align.ui.widget_undo_save.QMessageBox.critical", MagicMock())
+
+        widget._save_current()
+        assert not widget.promoted_banner.isHidden()
+
+        monkeypatch.setattr(widget_undo_save_module, "validate_manual_output", lambda out_dir, m: [], raising=False)
+        widget._save_current()
+        assert widget.promoted_banner.isHidden()
+
+    def test_upload_blocked_clears_on_success(
+        self, qapp, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        issue = ContractIssue(
+            severity=SEVERITY_ERROR,
+            code="output.missing_offsets",
+            message="offsets.txt not found",
+        )
+        pair = PairUploadReadiness(
+            moving_id=1,
+            fixed_id=0,
+            status=PairUploadStatus.INVALID,
+            output_dir=tmp_path / "slice_z01",
+            issues=(issue,),
+        )
+        blocked_report = _make_readiness_report(
+            ready_count=0,
+            invalid_count=1,
+            pairs=(pair,),
+        )
+        widget = _make_upload_widget(tmp_path, [(0, 1)], {1}, qapp=qapp)
+        widget.uploaded_pairs = set()
+        _patch_upload_settings(monkeypatch)
+        monkeypatch.setattr(
+            widget_server_module,
+            "assess_upload_readiness",
+            lambda *a, **k: blocked_report,
+            raising=False,
+        )
+        monkeypatch.setattr(
+            widget_server_module,
+            "QMessageBox",
+            type("QMessageBox", (), {"critical": staticmethod(lambda *_a, **_k: None)}),
+            raising=False,
+        )
+
+        widget._upload_to_server()
+        assert not widget.promoted_banner.isHidden()
+
+        widget._set_promoted_message(None, severity=SEVERITY_ERROR, source="upload_blocked")
+        widget._on_upload_finished(True, "Upload complete")
+        assert widget.promoted_banner.isHidden()
+
+
+class TestServerHeaderSummary:
+    """Collapsed Server header mirrors server_status_label (Phase 10 plan 03, D-11)."""
+
+    def test_collapsed_header_updates_on_status_change(
+        self, qapp, tmp_path: Path, isolated_panel_settings
+    ) -> None:
+        from qtpy.QtWidgets import QLabel
+
+        from linumpy_manual_align.ui.ui_builder import build_collapsible_section
+
+        widget = _make_upload_widget(tmp_path, [(0, 1)], {1}, qapp=qapp)
+        widget.server_status_label = QLabel()
+        content = QLabel("server inner")
+        _, widget._server_section = build_collapsible_section(
+            "Server",
+            content,
+            settings_key="ui/panel/server_expanded",
+            default_expanded=False,
+            summary_provider=lambda: widget.server_status_label.text(),
+        )
+        widget._server_section.set_expanded(False)
+
+        widget._set_server_status("Configured: sub-22 @ myserver.example.com")
+
+        assert widget._server_section.summary_label.text() == (
+            "Configured: sub-22 @ myserver.example.com"
+        )
+
+
+class TestPromotedMessageQueue:
+    """Promoted banner severity queue and resume dismiss (Phase 10 plan 02)."""
+
+    def test_error_shows_banner_text(self, qapp) -> None:
+        widget = _make_promoted_queue_widget(qapp)
+        widget._set_promoted_message("blocked", severity=SEVERITY_ERROR, source="save")
+
+        assert not widget.promoted_banner.isHidden()
+        assert widget.promoted_banner_label.text() == "blocked"
+        assert widget.btn_dismiss_banner.isHidden()
+
+    def test_higher_severity_wins_over_info(self, qapp) -> None:
+        widget = _make_promoted_queue_widget(qapp)
+        widget._set_promoted_message("error text", severity=SEVERITY_ERROR, source="save")
+        widget._set_promoted_message("info text", severity=SEVERITY_INFO, source="other")
+
+        assert widget.promoted_banner_label.text() == "error text"
+
+    def test_clearing_error_falls_back_to_info(self, qapp) -> None:
+        widget = _make_promoted_queue_widget(qapp)
+        widget._set_promoted_message("error text", severity=SEVERITY_ERROR, source="save")
+        widget._set_promoted_message("info text", severity=SEVERITY_INFO, source="other")
+        widget._set_promoted_message(None, severity=SEVERITY_INFO, source="save")
+
+        assert widget.promoted_banner_label.text() == "info text"
+
+    def test_clearing_all_sources_hides_banner(self, qapp) -> None:
+        widget = _make_promoted_queue_widget(qapp)
+        widget._set_promoted_message("error text", severity=SEVERITY_ERROR, source="save")
+        widget._set_promoted_message(None, severity=SEVERITY_INFO, source="save")
+
+        assert widget.promoted_banner.isHidden()
+
+    def test_dismiss_clears_only_resume_promotion(self, qapp) -> None:
+        widget = _make_promoted_queue_widget(qapp)
+        widget._set_promoted_message("resume msg", severity=SEVERITY_INFO, source="resume_promotion")
+        widget._set_promoted_message("error text", severity=SEVERITY_ERROR, source="save")
+
+        assert widget.btn_dismiss_banner.isHidden()
+
+        widget._set_promoted_message(None, severity=SEVERITY_INFO, source="save")
+        widget._set_promoted_message("resume msg", severity=SEVERITY_INFO, source="resume_promotion")
+        assert not widget.btn_dismiss_banner.isHidden()
+
+        widget._dismiss_promoted_banner()
+
+        assert widget.promoted_banner.isHidden()
+
+
+class TestPairDetailCollapsible:
+    """Pair detail collapsible default follows automated metrics (Phase 10 plan 02)."""
+
+    def test_defaults_collapsed_without_metrics(
+        self, qapp, tmp_path: Path, isolated_panel_settings
+    ) -> None:
+        widget = _make_build_ui_widget(tmp_path, pairs=[(0, 1)], existing_transforms={})
+
+        assert widget._pair_detail_section.content.isHidden()
+        assert widget._pair_detail_section.toggle.isChecked() is False
+
+    def test_defaults_expanded_with_automated_metrics(
+        self, qapp, tmp_path: Path, isolated_panel_settings
+    ) -> None:
+        metrics_dir = tmp_path / "slice_z01"
+        metrics_dir.mkdir()
+        (metrics_dir / "pairwise_registration_metrics.json").write_text(
+            json.dumps({"metrics": {"translation_x": {"value": 1.0}}}),
+            encoding="utf-8",
+        )
+        widget = _make_build_ui_widget(
+            tmp_path,
+            pairs=[(0, 1)],
+            existing_transforms={1: metrics_dir},
+        )
+
+        assert not widget._pair_detail_section.content.isHidden()
+        assert widget._pair_detail_section.toggle.isChecked() is True
+
+
+class TestDisplaySummary:
+    """Display collapsed header summary updates on combo change (D-12)."""
+
+    def test_overlay_enhance_summary_updates_while_collapsed(
+        self, qapp, tmp_path: Path
+    ) -> None:
+        widget = _make_build_ui_widget(tmp_path)
+        widget._display_section.set_expanded(False)
+
+        widget.combo_overlay.setCurrentIndex(1)
+        widget.combo_enhance.setCurrentIndex(2)
+
+        expected = f"{widget.combo_overlay.currentText()} · {widget.combo_enhance.currentText()}"
+        assert widget._display_section.summary_label.text() == expected
 
 
 class TestSessionGroupBuild:
@@ -1513,6 +2344,214 @@ class TestSessionGroupBuild:
         assert "uploaded" not in summary
 
 
+_COMBO_STATE_COLORS: dict[PairSessionState, str] = {
+    PairSessionState.INVALID: "#c0392b",
+    PairSessionState.UNSAVED: "#d68910",
+    PairSessionState.UNCHANGED: "#7f8c8d",
+    PairSessionState.UPLOADED: "#2980b9",
+    PairSessionState.READY: "#27ae60",
+    PairSessionState.SAVED_LOCAL: "#2ecc71",
+}
+
+_COMBO_STATE_TOOLTIPS: dict[PairSessionState, str] = {
+    PairSessionState.INVALID: "Invalid output or upload blocked — fix before save/upload",
+    PairSessionState.UNSAVED: "Unsaved changes — save before upload",
+    PairSessionState.UNCHANGED: "No manual transform saved yet",
+    PairSessionState.UPLOADED: "Uploaded to server this session",
+    PairSessionState.READY: "Saved locally and ready to upload",
+    PairSessionState.SAVED_LOCAL: "Saved locally (server mode: not yet uploaded)",
+}
+
+
+def _combo_foreground_hex(combo: _ComboStub, index: int) -> str | None:
+    from qtpy.QtCore import Qt
+
+    brush = combo.itemData(index, Qt.ForegroundRole)
+    if brush is None:
+        return None
+    return brush.color().name()
+
+
+def _combo_tooltip(combo: _ComboStub, index: int) -> str | None:
+    from qtpy.QtCore import Qt
+
+    value = combo.itemData(index, Qt.ToolTipRole)
+    return value if isinstance(value, str) else None
+
+
+class TestComboStateStyling:
+    """Combo foreground colors and tooltips per PairSessionState (Phase 10 plan 04, D-20)."""
+
+    def test_each_state_gets_color_and_tooltip(
+        self, tmp_path: Path, copy_fixture_tree, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _copy_valid_slice_output(copy_fixture_tree, tmp_path, mid=1)
+        _copy_valid_slice_output(copy_fixture_tree, tmp_path, mid=2)
+        for mid in (3, 5, 6):
+            dest = tmp_path / f"slice_z{mid:02d}"
+            if not dest.exists():
+                shutil.copytree(tmp_path / "slice_z01", dest)
+        ready_dir = tmp_path / "slice_z05"
+        (tmp_path / "slice_z04").mkdir()
+        pair_ready = PairUploadReadiness(
+            moving_id=5,
+            fixed_id=4,
+            status=PairUploadStatus.READY,
+            output_dir=ready_dir,
+            issues=(),
+        )
+        pair_saved = PairUploadReadiness(
+            moving_id=3,
+            fixed_id=2,
+            status=PairUploadStatus.MISSING,
+            output_dir=tmp_path / "slice_z03",
+            issues=(),
+        )
+        pair_unchanged = PairUploadReadiness(
+            moving_id=1,
+            fixed_id=0,
+            status=PairUploadStatus.MISSING,
+            output_dir=None,
+            issues=(),
+        )
+        pair_unsaved = PairUploadReadiness(
+            moving_id=2,
+            fixed_id=1,
+            status=PairUploadStatus.MISSING,
+            output_dir=tmp_path / "slice_z02",
+            issues=(),
+        )
+        pair_invalid = PairUploadReadiness(
+            moving_id=4,
+            fixed_id=3,
+            status=PairUploadStatus.INVALID,
+            output_dir=tmp_path / "slice_z04",
+            issues=(),
+        )
+        pair_uploaded = PairUploadReadiness(
+            moving_id=6,
+            fixed_id=5,
+            status=PairUploadStatus.MISSING,
+            output_dir=None,
+            issues=(),
+        )
+        report = _make_readiness_report(
+            ready_count=1,
+            pairs=(
+                pair_unchanged,
+                pair_unsaved,
+                pair_saved,
+                pair_invalid,
+                pair_ready,
+                pair_uploaded,
+            ),
+            ready_dirs=(ready_dir,),
+        )
+        import linumpy_manual_align.ui.widget_session as widget_session_module
+
+        monkeypatch.setattr(
+            widget_session_module,
+            "assess_upload_readiness",
+            lambda *a, **k: report,
+            raising=False,
+        )
+        pairs = [(0, 1), (1, 2), (2, 3), (3, 4), (4, 5), (5, 6)]
+        widget = _make_session_widget(
+            tmp_path,
+            pairs,
+            saved_pairs={2, 3, 4, 5, 6},
+            unsaved_changes={2},
+            uploaded_pairs={6},
+            server_config=_UploadServerConfig(
+                host="myserver.example.com",
+                subject_id="sub-22",
+            ),
+        )
+
+        widget._refresh_session_state()
+
+        expected_by_index = {
+            0: PairSessionState.UNCHANGED,
+            1: PairSessionState.UNSAVED,
+            2: PairSessionState.SAVED_LOCAL,
+            3: PairSessionState.INVALID,
+            4: PairSessionState.READY,
+            5: PairSessionState.UPLOADED,
+        }
+        for index, state in expected_by_index.items():
+            assert _combo_foreground_hex(widget.pair_combo, index) == _COMBO_STATE_COLORS[state]
+            assert _combo_tooltip(widget.pair_combo, index) == _COMBO_STATE_TOOLTIPS[state]
+
+    def test_prefix_priority_unchanged_with_styling(
+        self, tmp_path: Path, copy_fixture_tree, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _copy_valid_slice_output(copy_fixture_tree, tmp_path, mid=1)
+        ready_dir = tmp_path / "slice_z01"
+        pair = PairUploadReadiness(
+            moving_id=1,
+            fixed_id=0,
+            status=PairUploadStatus.READY,
+            output_dir=ready_dir,
+            issues=(),
+        )
+        report = _make_readiness_report(
+            ready_count=1,
+            pairs=(pair,),
+            ready_dirs=(ready_dir,),
+        )
+        import linumpy_manual_align.ui.widget_session as widget_session_module
+
+        monkeypatch.setattr(
+            widget_session_module,
+            "assess_upload_readiness",
+            lambda *a, **k: report,
+            raising=False,
+        )
+        (tmp_path / "slice_z02").mkdir()
+        widget = _make_session_widget(
+            tmp_path,
+            [(0, 1), (1, 2)],
+            saved_pairs={1, 2},
+            unsaved_changes={2},
+            uploaded_pairs={1},
+            server_config=_UploadServerConfig(
+                host="myserver.example.com",
+                subject_id="sub-22",
+            ),
+        )
+
+        widget._refresh_session_state()
+
+        assert widget.pair_combo.itemText(0).startswith("↑ ")
+        assert widget.pair_combo.itemText(1).startswith("✗ ")
+
+    def test_local_only_omits_ready_uploaded_styling(
+        self, tmp_path: Path, copy_fixture_tree
+    ) -> None:
+        _copy_valid_slice_output(copy_fixture_tree, tmp_path, mid=1)
+        widget = _make_session_widget(
+            tmp_path,
+            [(0, 1)],
+            saved_pairs={1},
+            uploaded_pairs={1},
+            server_config=None,
+        )
+
+        widget._refresh_session_state()
+
+        assert widget.pair_combo.itemText(0).startswith("✓ ")
+        assert _combo_foreground_hex(widget.pair_combo, 0) == _COMBO_STATE_COLORS[
+            PairSessionState.SAVED_LOCAL
+        ]
+        assert _combo_tooltip(widget.pair_combo, 0) == _COMBO_STATE_TOOLTIPS[
+            PairSessionState.SAVED_LOCAL
+        ]
+        summary = widget.session_summary_label.text
+        assert "ready" not in summary
+        assert "uploaded" not in summary
+        assert not widget.resume_block.isVisible()
+
+
 class _ClipboardStub:
     def __init__(self) -> None:
         self.text = ""
@@ -1533,6 +2572,7 @@ def _make_session_confidence_widget(
         subject_id="sub-22",
         remote_output="/scratch/workspace/sub-22/output",
     ),
+    qapp=None,
 ):
     from linumpy_manual_align.ui.widget_pair_loading import PairLoadingMixin
     from linumpy_manual_align.ui.widget_session import SessionMixin
@@ -1581,6 +2621,7 @@ def _make_session_confidence_widget(
     widget._btn_mode_z = _BtnModeZ()
     widget.resume_block = _ResumeBlockStub()
     widget._current_state = lambda: AlignmentState(tx=0.0, ty=0.0, rotation=0.0)
+    _attach_promoted_banner(widget, qapp)
     return widget
 
 
@@ -1838,6 +2879,63 @@ class TestSessionConfidence:
         _finish_upload(widget, mids={1, 2}, msg=msg)
 
         assert widget.server_status_label.text == msg
+
+
+class TestResumePromotion:
+    """Resume guidance promoted to banner after upload (Phase 10 plan 04, D-22)."""
+
+    def test_upload_promotes_resume_to_banner_and_block(
+        self, qapp, tmp_path: Path, copy_fixture_tree, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _copy_valid_slice_output(copy_fixture_tree, tmp_path, mid=1)
+        widget = _make_session_confidence_widget(
+            tmp_path, [(0, 1)], saved_pairs={1}, qapp=qapp
+        )
+        _patch_upload_settings(monkeypatch)
+
+        _finish_upload(widget, mids={1})
+
+        assert widget.resume_block.isVisible()
+        assert "params.manual_transforms_dir = '" in widget.resume_config_label.text
+        banner_text = widget.promoted_banner_label.text()
+        assert "params.manual_transforms_dir = '" in banner_text
+        assert "-resume" in banner_text
+        assert not widget.promoted_banner.isHidden()
+
+    def test_dismiss_banner_leaves_resume_block_visible(
+        self, qapp, tmp_path: Path, copy_fixture_tree, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _copy_valid_slice_output(copy_fixture_tree, tmp_path, mid=1)
+        widget = _make_session_confidence_widget(
+            tmp_path, [(0, 1)], saved_pairs={1}, qapp=qapp
+        )
+        _patch_upload_settings(monkeypatch)
+        _finish_upload(widget, mids={1})
+
+        assert widget.resume_block.isVisible()
+        assert not widget.promoted_banner.isHidden()
+
+        widget._dismiss_promoted_banner()
+
+        assert widget.promoted_banner.isHidden()
+        assert widget.resume_block.isVisible()
+
+    def test_local_only_shows_neither_banner_nor_resume_block(
+        self, qapp, tmp_path: Path, copy_fixture_tree
+    ) -> None:
+        _copy_valid_slice_output(copy_fixture_tree, tmp_path, mid=1)
+        widget = _make_session_confidence_widget(
+            tmp_path,
+            [(0, 1)],
+            saved_pairs={1},
+            server_config=None,
+            qapp=qapp,
+        )
+        widget._pending_upload_mids = {1}
+        widget._on_upload_finished(True, "Uploaded 1 transforms")
+
+        assert not widget.resume_block.isVisible()
+        assert widget.promoted_banner.isHidden()
 
 
 _MISSING_METADATA_MSG = (

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from collections import Counter
 
+from qtpy.QtCore import Qt
+from qtpy.QtGui import QBrush, QColor
 from qtpy.QtWidgets import QApplication
 
 from linumpy_manual_align.contracts import (
@@ -21,6 +23,24 @@ from linumpy_manual_align.contracts import (
 )
 from linumpy_manual_align.contracts.upload_readiness import _resolve_session_output_dir
 from linumpy_manual_align.ui.widget_typing import ManualAlignWidget
+
+_COMBO_STATE_FOREGROUND: dict[PairSessionState, str] = {
+    PairSessionState.INVALID: "#c0392b",
+    PairSessionState.UNSAVED: "#d68910",
+    PairSessionState.UNCHANGED: "#7f8c8d",
+    PairSessionState.UPLOADED: "#2980b9",
+    PairSessionState.READY: "#27ae60",
+    PairSessionState.SAVED_LOCAL: "#2ecc71",
+}
+
+_COMBO_STATE_TOOLTIP: dict[PairSessionState, str] = {
+    PairSessionState.INVALID: "Invalid output or upload blocked — fix before save/upload",
+    PairSessionState.UNSAVED: "Unsaved changes — save before upload",
+    PairSessionState.UNCHANGED: "No manual transform saved yet",
+    PairSessionState.UPLOADED: "Uploaded to server this session",
+    PairSessionState.READY: "Saved locally and ready to upload",
+    PairSessionState.SAVED_LOCAL: "Saved locally (server mode: not yet uploaded)",
+}
 
 
 class SessionMixin:
@@ -93,8 +113,28 @@ class SessionMixin:
         current = self.pair_combo.currentIndex()
         for i, (fid, mid) in enumerate(self.pairs):
             self.pair_combo.setItemText(i, self._pair_label(fid, mid))
+        self._apply_combo_state_styling()
         self.pair_combo.setCurrentIndex(current)
         self.pair_combo.blockSignals(False)
+
+    def _apply_combo_state_styling(self: ManualAlignWidget) -> None:
+        server_enabled = self.server_config is not None
+        states = getattr(self, "_session_states", {})
+        for i, (_fid, mid) in enumerate(self.pairs):
+            state = states.get(mid)
+            if state is None:
+                continue
+            if not server_enabled and state in (
+                PairSessionState.READY,
+                PairSessionState.UPLOADED,
+            ):
+                continue
+            color_hex = _COMBO_STATE_FOREGROUND[state]
+            tooltip = _COMBO_STATE_TOOLTIP[state]
+            self.pair_combo.setItemData(
+                i, QBrush(QColor(color_hex)), Qt.ForegroundRole
+            )
+            self.pair_combo.setItemData(i, tooltip, Qt.ToolTipRole)
 
     def _session_status_line(self: ManualAlignWidget, mid: int) -> str | None:
         state = self._session_states.get(mid)

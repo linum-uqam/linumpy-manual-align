@@ -22,6 +22,7 @@ from qtpy.QtWidgets import (
     QComboBox,
     QDoubleSpinBox,
     QFormLayout,
+    QFrame,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -36,6 +37,7 @@ from qtpy.QtWidgets import (
     QWidget,
 )
 
+from linumpy_manual_align.settings import settings as _settings
 from linumpy_manual_align.settings_runtime import (
     apply_cross_section_slider_steps,
     default_host_display,
@@ -461,6 +463,150 @@ def build_display_group(
     )
 
 
+def build_collapsible_section(
+    title: str,
+    content: QWidget,
+    *,
+    settings_key: str,
+    default_expanded: bool,
+    summary_provider: Callable[[], str] | None = None,
+) -> tuple[QWidget, types.SimpleNamespace]:
+    """Build a collapsible section with persisted expand/collapse state.
+
+    Returns ``(root_widget, widgets)`` where *widgets* has ``toggle``,
+    ``title_label``, ``summary_label``, ``content``, ``set_expanded``, and
+    ``refresh_summary``.
+    """
+    if _settings.is_set(settings_key):
+        expanded = _settings.get(settings_key)
+    else:
+        expanded = default_expanded
+
+    root = QWidget()
+    layout = QVBoxLayout()
+    layout.setContentsMargins(0, 0, 0, 0)
+    layout.setSpacing(4)
+    root.setLayout(layout)
+
+    header = QHBoxLayout()
+    header.setContentsMargins(8, 8, 8, 8)
+    header.setSpacing(8)
+
+    toggle = QToolButton()
+    toggle.setCheckable(True)
+    toggle.setChecked(expanded)
+    toggle.setArrowType(Qt.DownArrow if expanded else Qt.RightArrow)
+    header.addWidget(toggle)
+
+    title_label = QLabel(title)
+    title_font = title_label.font()
+    title_font.setBold(True)
+    title_label.setFont(title_font)
+    header.addWidget(title_label)
+
+    summary_label = QLabel("")
+    summary_label.setStyleSheet("color: #808080;")
+    header.addWidget(summary_label, stretch=1)
+
+    layout.addLayout(header)
+    layout.addWidget(content)
+    content.setVisible(expanded)
+
+    def refresh_summary() -> None:
+        if summary_provider is not None and not toggle.isChecked():
+            summary_label.setText(summary_provider())
+        else:
+            summary_label.setText("")
+
+    def set_expanded(on: bool) -> None:
+        toggle.blockSignals(True)
+        toggle.setChecked(on)
+        toggle.blockSignals(False)
+        _apply_expanded(on)
+
+    def _apply_expanded(on: bool) -> None:
+        content.setVisible(on)
+        toggle.setArrowType(Qt.DownArrow if on else Qt.RightArrow)
+        refresh_summary()
+        _settings.set(settings_key, on)
+
+    def _on_toggled(on: bool) -> None:
+        _apply_expanded(on)
+
+    toggle.toggled.connect(_on_toggled)
+    refresh_summary()
+
+    return root, types.SimpleNamespace(
+        toggle=toggle,
+        title_label=title_label,
+        summary_label=summary_label,
+        content=content,
+        set_expanded=set_expanded,
+        refresh_summary=refresh_summary,
+    )
+
+
+def build_actions_row(
+    on_save: Callable,
+    on_save_all: Callable,
+    on_upload: Callable,
+) -> tuple[QHBoxLayout, types.SimpleNamespace]:
+    """Build the Save / Save All / Upload row (no group box title).
+
+    Returns ``(layout, widgets)`` where *widgets* has ``btn_save``,
+    ``btn_save_all``, ``btn_upload``.
+    """
+    row = QHBoxLayout()
+    btn_save = QPushButton("Save Current (S)")
+    btn_save.clicked.connect(on_save)
+    row.addWidget(btn_save, stretch=1)
+    btn_save_all = QPushButton("Save All && Exit")
+    btn_save_all.clicked.connect(on_save_all)
+    row.addWidget(btn_save_all, stretch=1)
+    btn_upload = QPushButton("⬆ Upload Transforms")
+    btn_upload.setToolTip("Upload saved manual transforms to the server.")
+    btn_upload.clicked.connect(on_upload)
+    row.addWidget(btn_upload, stretch=1)
+    return row, types.SimpleNamespace(
+        btn_save=btn_save,
+        btn_save_all=btn_save_all,
+        btn_upload=btn_upload,
+    )
+
+
+def build_promoted_banner(
+    on_dismiss: Callable | None = None,
+) -> tuple[QWidget, types.SimpleNamespace]:
+    """Build the pinned promoted-message banner (hidden until shown).
+
+    Returns ``(root_widget, widgets)`` where *widgets* has ``banner_label``
+    and ``btn_dismiss``.
+    """
+    root = QFrame()
+    root.setFrameShape(QFrame.StyledPanel)
+    layout = QHBoxLayout()
+    layout.setContentsMargins(16, 16, 16, 16)
+    root.setLayout(layout)
+
+    banner_label = QLabel("")
+    banner_label.setWordWrap(True)
+    layout.addWidget(banner_label, stretch=1)
+
+    btn_dismiss = QToolButton()
+    btn_dismiss.setText("×")
+    btn_dismiss.hide()
+    if on_dismiss is not None:
+        btn_dismiss.clicked.connect(on_dismiss)
+    layout.addWidget(btn_dismiss)
+
+    root.hide()
+
+    return root, types.SimpleNamespace(
+        banner_label=banner_label,
+        btn_dismiss=btn_dismiss,
+    )
+
+
 def build_save_row(on_save: Callable, on_save_all: Callable) -> tuple[QHBoxLayout, types.SimpleNamespace]:
     """Build the Save / Save All row.
 
@@ -482,13 +628,12 @@ def build_server_group(
     on_host_changed: Callable,
     on_remote_python_changed: Callable,
     on_download: Callable,
-    on_upload: Callable,
 ) -> tuple[QGroupBox, types.SimpleNamespace]:
-    """Build the Server group box (config, host, remote Python, download/upload buttons).
+    """Build the Server group box (config, host, remote Python, download button).
 
     Returns ``(group_widget, widgets)`` where *widgets* has
     ``config_path_edit``, ``btn_browse_config``, ``host_edit``,
-    ``remote_python_edit``, ``btn_download``, ``btn_upload``, ``server_progress``,
+    ``remote_python_edit``, ``btn_download``, ``server_progress``,
     ``server_status_label``.
     """
     group = QGroupBox("Server")
@@ -535,10 +680,6 @@ def build_server_group(
     btn_download.setToolTip("Download AIPs and transforms from the server.")
     btn_download.clicked.connect(on_download)
     srv_btn_row.addWidget(btn_download)
-    btn_upload = QPushButton("⬆ Upload Transforms")
-    btn_upload.setToolTip("Upload saved manual transforms to the server.")
-    btn_upload.clicked.connect(on_upload)
-    srv_btn_row.addWidget(btn_upload)
     layout.addLayout(srv_btn_row)
 
     server_progress = QProgressBar()
@@ -567,7 +708,6 @@ def build_server_group(
             remote_python_edit.blockSignals(False)
     else:
         btn_download.setEnabled(False)
-        btn_upload.setEnabled(False)
         server_status_label.setText("<i>Browse for a nextflow.config to enable server features</i>")
 
     return group, types.SimpleNamespace(
@@ -576,7 +716,6 @@ def build_server_group(
         host_edit=host_edit,
         remote_python_edit=remote_python_edit,
         btn_download=btn_download,
-        btn_upload=btn_upload,
         server_progress=server_progress,
         server_status_label=server_status_label,
     )
@@ -585,12 +724,16 @@ def build_server_group(
 def build_session_group(
     on_copy_config: Callable,
     on_dismiss_resume: Callable,
+    mode_row: QWidget | QHBoxLayout | None = None,
 ) -> tuple[QGroupBox, types.SimpleNamespace]:
     """Build the Session group box (summary line + hidden resume block).
 
     Returns ``(group_widget, widgets)`` where *widgets* has
     ``session_summary_label``, ``resume_block``, ``resume_config_label``,
     ``resume_guidance_label``, ``btn_copy_config_line``, ``btn_dismiss_resume``.
+
+    When *mode_row* is provided it is inserted below the session summary
+    (D-04).
     """
     group = QGroupBox("Session")
     layout = QVBoxLayout()
@@ -600,6 +743,12 @@ def build_session_group(
     session_summary_label = QLabel("")
     session_summary_label.setWordWrap(True)
     layout.addWidget(session_summary_label)
+
+    if mode_row is not None:
+        if isinstance(mode_row, QHBoxLayout):
+            layout.addLayout(mode_row)
+        else:
+            layout.addWidget(mode_row)
 
     resume_block = QWidget()
     resume_layout = QVBoxLayout()

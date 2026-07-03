@@ -141,7 +141,12 @@ class UndoSaveMixin:
             self.saved_pairs.discard(mid)
             message = self._format_save_error(mid, errors, out_dir)
             self.viewer.status = message
-            self.status_label.setText(message)
+            if hasattr(self, "_set_promoted_message"):
+                self._set_promoted_message(
+                    message, severity=SEVERITY_ERROR, source="save_error"
+                )
+            else:
+                self.status_label.setText(message)
             QMessageBox.critical(self, "Save validation failed", message)
             if hasattr(self, "_refresh_session_state"):
                 self._refresh_session_state()
@@ -164,6 +169,8 @@ class UndoSaveMixin:
             status = base
         self.viewer.status = status
         self.status_label.setText(status)
+        if hasattr(self, "_set_promoted_message"):
+            self._set_promoted_message(None, severity=SEVERITY_ERROR, source="save_error")
         self._flash_saved(mid)
         if hasattr(self, "_refresh_session_state"):
             self._refresh_session_state()
