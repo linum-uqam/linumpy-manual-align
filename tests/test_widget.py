@@ -12,7 +12,7 @@ import pytest
 import linumpy_manual_align.ui.widget_close_guard as widget_close_guard_module
 import linumpy_manual_align.ui.widget_server as widget_server_module
 import linumpy_manual_align.ui.widget_undo_save as widget_undo_save_module
-from linumpy_manual_align.__main__ import parse_args
+from linumpy_manual_align.__main__ import _build_arg_parser, parse_args
 from linumpy_manual_align.contracts import (
     SEVERITY_ERROR,
     SEVERITY_INFO,
@@ -258,6 +258,39 @@ class TestParseArgs:
     def test_server_config(self) -> None:
         args = parse_args(["--server_config", "/tmp/nextflow.config"])
         assert str(args.server_config) == "/tmp/nextflow.config"
+
+
+class TestBuildArgParser:
+    """Tests for the standalone parser builder used by sphinx-argparse."""
+
+    def test_returns_argument_parser_without_parsing(self) -> None:
+        import argparse
+
+        p = _build_arg_parser()
+        assert isinstance(p, argparse.ArgumentParser)
+
+    def test_all_eight_arguments_registered(self) -> None:
+        p = _build_arg_parser()
+        actions = {a.dest for a in p._actions if a.dest != "help"}
+        assert actions == {
+            "input_dir",
+            "transforms_dir",
+            "output_dir",
+            "level",
+            "slices",
+            "data_package",
+            "server_config",
+            "debug",
+        }
+
+    def test_defaults_match_parse_args(self) -> None:
+        p = _build_arg_parser()
+        ns = p.parse_args([])
+        assert ns.level is None
+        assert ns.slices is None
+        assert ns.server_config is None
+        assert ns.output_dir is None
+
 
 
 class TestOutputDirResolution:
