@@ -93,8 +93,8 @@ def _apply_ingest_to_cli_paths(
     return result.aips_dir, result.aips_xz_dir, result.aips_yz_dir
 
 
-def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    """Parse command-line arguments and return the parsed namespace."""
+def _build_arg_parser() -> argparse.ArgumentParser:
+    """Build the argparse parser for sphinx-argparse and CLI use."""
     p = argparse.ArgumentParser(
         description="Interactive manual slice alignment (napari).",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -155,7 +155,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=False,
         help="Enable DEBUG logging for linumpy_manual_align (useful for diagnosing slider issues).",
     )
-    return p.parse_args(argv)
+    return p
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    """Parse command-line arguments and return the parsed namespace."""
+    return _build_arg_parser().parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> None:
