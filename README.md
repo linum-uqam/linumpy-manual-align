@@ -7,7 +7,8 @@ in the [linumpy](https://github.com/linum-uqam/linumpy) reconstruction pipeline.
 
 ## Documentation
 
-- [CLI + Nextflow integration guide](docs/cli-nextflow-guide.md)
+- [Online documentation](https://linumpy-manual-align.readthedocs.io/en/latest/) — Sphinx site (API reference, CLI options, architecture)
+- [CLI + Nextflow integration guide](docs/cli-nextflow-guide.md) — source Markdown
 
 ## Installation
 
@@ -191,10 +192,11 @@ Formal maintainer-facing architecture artifacts live under `docs/architecture/`:
 
 | Document | Description |
 |----------|-------------|
-| [BOUNDARIES.md](docs/architecture/BOUNDARIES.md) | Layer boundary map with Mermaid diagram and import matrix |
-| [MIXIN-MATRIX.md](docs/architecture/MIXIN-MATRIX.md) | Mixin responsibility matrix (MRO order, test pointers) |
-| [REFACTOR-SEQUENCE.md](docs/architecture/REFACTOR-SEQUENCE.md) | Ordered incremental refactor sequence with test gates |
-| [COVERAGE-BASELINE.md](docs/architecture/COVERAGE-BASELINE.md) | Pre-refactor pytest-cov baseline for `contracts/` and `io/` |
+| [BOUNDARIES.md](https://linumpy-manual-align.readthedocs.io/en/latest/architecture/BOUNDARIES.html) | Layer boundary map with Mermaid diagram and import matrix |
+| [MIXIN-MATRIX.md](https://linumpy-manual-align.readthedocs.io/en/latest/architecture/MIXIN-MATRIX.html) | Mixin responsibility matrix (MRO order, test pointers) |
+| [REFACTOR-SEQUENCE.md](https://linumpy-manual-align.readthedocs.io/en/latest/architecture/REFACTOR-SEQUENCE.html) | Ordered incremental refactor sequence with test gates |
+| [COVERAGE-BASELINE.md](https://linumpy-manual-align.readthedocs.io/en/latest/architecture/COVERAGE-BASELINE.html) | Pre-refactor pytest-cov baseline for `contracts/` and `io/` |
+| [NAPI-HOT-PATHS.md](https://linumpy-manual-align.readthedocs.io/en/latest/architecture/NAPI-HOT-PATHS.html) | Napari hot-path audit: overlay rebuild, enhancement, remote cross-section refresh |
 
 ## Development
 
