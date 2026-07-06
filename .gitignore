@@ -40,3 +40,7 @@ specs/
 # GSD meta / surface state
 .gsd/
 .gsd-profile
+
+# === Sphinx docs build output ===
+docs/_build/
+docs/api/
