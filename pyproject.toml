@@ -98,6 +98,7 @@ testpaths = ["tests"]
 pythonpath = ["src"]
 markers = [
     "napari_benchmark: optional headless memory/perf benchmark; excluded from default CI (wired in Phase 12 GUI-01 suite)",
+    "docs_build: builds the full Sphinx site via subprocess; slow (~30-60s), excluded from default fast CI (wired in Phase 12 CI-01)",
 ]
 # SimpleITK (SWIG) and transitive pydantic deprecations are noisy but outside this repo.
 filterwarnings = [
