@@ -13,9 +13,12 @@ build/
 linumpy_manual_align_local.*
 
 # === OpenGSD (gsd-core) — keep ALL GSD-produced files out of git ===
-# Runtime installs (Cursor / Claude / Windsurf)
+# Runtime installs (Cursor / Claude / Cascade / Windsurf)
 .cursor/
 .claude/
+.devin/
+.devin/gsd-local-patches/
+.devin/gsd-pristine/
 .windsurf/
 .windsurf/gsd-local-patches/
 .windsurf/gsd-pristine/
